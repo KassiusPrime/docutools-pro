@@ -1,7 +1,6 @@
-streamlit==1.28.1
-pypdf==4.0.1
-python-docx==0.8.11
-beautifulsoup4==4.12.2
-deep-translator==1.11.4
-gTTS==2.4.0
-pydub==0.25.1
+streamlit
+pypdf
+python-docx
+beautifulsoup4
+deep-translator
+gTTS
