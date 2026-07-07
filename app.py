@@ -207,9 +207,10 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.header("1️⃣ Upload do Arquivo")
-    uploaded_file = st.file_input(
+   uploaded_file = st.file_input(
     "Suporta: PDF, DOCX, HTML e TXT", 
-    type=["pdf", "docx", "html", "txt"]
+    type=["pdf", "docx", "html", "txt"],
+    key="file_uploader"
 )
     
     texto_extraido = ""
