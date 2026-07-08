@@ -7,10 +7,7 @@ from gtts import gTTS
 from fpdf import FPDF
 from PIL import Image
 import io
-import json
 from datetime import datetime
-import tempfile
-import os
 
 # Tentar importar rembg (removedor de fundo)
 try:
@@ -181,17 +178,19 @@ def converter_para_pdf(texto):
         pdf = FPDF()
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.set_font("Arial", size=11)
+        # Substituído 'Arial' por 'Helvetica' para evitar falhas de fontes nativas
+        pdf.set_font("Helvetica", size=11)
         
         for linha in texto.split('\n'):
-            if linha.strip():
-                pdf.multi_cell(0, 10, txt=linha)
+            # Sanitiza a linha para evitar quebras por caracteres incompatíveis com latin-1
+            linha_sanitizada = linha.encode('latin-1', 'replace').decode('latin-1')
+            if linha_sanitizada.strip():
+                pdf.multi_cell(0, 10, text=linha_sanitizada)
             else:
                 pdf.ln(5)
         
-        pdf_bytes = io.BytesIO()
-        pdf.output(pdf_bytes)
-        return pdf_bytes.getvalue()
+        # No fpdf2, chamar output() sem argumentos já retorna os bytes diretamente
+        return pdf.output()
     except Exception as e:
         st.error(f"Erro ao converter PDF: {e}")
         return None
@@ -272,20 +271,20 @@ def converter_para_imagem(texto, formato='png'):
         # Desenhar texto
         y = 20
         margin = 20
-        max_width = width - (2 * margin)
         
         for linha in texto.split('\n'):
-            # Quebrar linhas longas
             while len(linha) > 0:
                 draw.text((margin, y), linha[:80], fill='black', font=font)
                 linha = linha[80:]
                 y += 30
                 if y > height - 50:
                     break
+            if y > height - 50:  # CORREÇÃO: Quebra o laço externo também se acabar o espaço vertical
+                break
         
         # Salvar em bytes
         img_bytes = io.BytesIO()
-        if formato.lower() == 'jpg':
+        if formato.lower() in ['jpg', 'jpeg']:
             img = img.convert('RGB')
             img.save(img_bytes, format='JPEG', quality=95)
         else:
@@ -579,6 +578,9 @@ st.header("🎨 Removedor de Fundo de Imagem")
 
 col_img1, col_img2 = st.columns(2, gap="large")
 
+# Inicialização preventiva da variável para evitar NameError
+uploaded_image = None
+
 with col_img1:
     st.subheader("Upload da Imagem")
     
@@ -592,7 +594,7 @@ with col_img1:
         
         if uploaded_image is not None:
             img = Image.open(uploaded_image)
-            st.image(img, caption="Imagem Original", use_column_width=True)
+            st.image(img, caption="Imagem Original", use_container_width=True)
             
             st.write(f"Dimensões: {img.size[0]}x{img.size[1]} pixels")
             st.write(f"Tamanho: {uploaded_image.size / 1024:.2f} KB")
@@ -612,7 +614,7 @@ with col_img2:
                 st.success("✨ Fundo removido com sucesso!")
                 
                 img_resultado = Image.open(io.BytesIO(resultado))
-                st.image(img_resultado, caption="Imagem Sem Fundo", use_column_width=True)
+                st.image(img_resultado, caption="Imagem Sem Fundo", use_container_width=True)
                 
                 st.download_button(
                     "📥 Baixar Imagem Sem Fundo",
