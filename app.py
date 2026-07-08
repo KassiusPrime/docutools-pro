@@ -20,7 +20,6 @@ st.write("---")
 # 🔧 INICIALIZAÇÃO DE ESTADO E CACHE PERSISTENTE
 # ============================================================
 
-# Arquivo de cache persistente (local)
 CACHE_FILE = "docu_cache.json"
 
 def carregar_cache():
@@ -87,12 +86,9 @@ def dividir_em_blocos(texto, tamanho_maximo=3500):
     inicio = 0
     
     while inicio < len(texto):
-        # Pega até tamanho_maximo caracteres
         fim = inicio + tamanho_maximo
         
-        # Se não chegou ao final, procura pelo último espaço para não quebrar palavras
         if fim < len(texto):
-            # Encontra o último espaço antes de 'fim'
             ultimo_espaco = texto.rfind(' ', inicio, fim)
             if ultimo_espaco > inicio:
                 fim = ultimo_espaco
@@ -100,7 +96,7 @@ def dividir_em_blocos(texto, tamanho_maximo=3500):
         blocos.append(texto[inicio:fim].strip())
         inicio = fim
     
-    return [b for b in blocos if b]  # Remove blocos vazios
+    return [b for b in blocos if b]
 
 # ============================================================
 # 🌍 FUNÇÃO DE TRADUÇÃO COM CHUNKING
@@ -122,18 +118,15 @@ def traduzir_com_chunking(texto, idioma_destino):
     
     texto_traduzido_completo = []
     
-    # Container para a barra de progresso
     placeholder_progresso = st.empty()
     placeholder_status = st.empty()
     
     for index, bloco in enumerate(blocos):
         try:
-            # Atualiza status
             progresso_percentual = (index + 1) / len(blocos)
             placeholder_status.info(f"📦 Traduzindo bloco {index + 1} de {len(blocos)}...")
             placeholder_progresso.progress(progresso_percentual)
             
-            # Traduz o bloco
             bloco_traduzido = tradutor.translate(bloco)
             texto_traduzido_completo.append(bloco_traduzido)
             
@@ -141,19 +134,18 @@ def traduzir_com_chunking(texto, idioma_destino):
             st.error(f"❌ Erro ao traduzir bloco {index + 1}: {str(e)}")
             raise
     
-    # Limpa placeholders
     placeholder_progresso.empty()
     placeholder_status.empty()
     
     return "\n".join(texto_traduzido_completo)
 
 # ============================================================
-# 🔊 FUNÇÃO DE ÁUDIO COM CHUNKING (para textos gigantes)
+# 🔊 FUNÇÃO DE ÁUDIO COM CHUNKING
 # ============================================================
 
 def gerar_audio_com_chunking(texto, lang_audio='pt'):
     """
-    Gera áudio dividindo em blocos (gTTS tem limite de ~100-200 caracteres por requisição)
+    Gera áudio dividindo em blocos
     
     Args:
         texto: Texto a converter
@@ -162,33 +154,15 @@ def gerar_audio_com_chunking(texto, lang_audio='pt'):
     Returns:
         BytesIO com arquivo MP3
     """
-    blocos = dividir_em_blocos(texto, tamanho_maximo=500)  # Limite menor para áudio
-    
     arquivo_saida = io.BytesIO()
     placeholder_progresso_audio = st.empty()
     
     try:
-        # Junta todos os áudios em um arquivo único
-        from pydub import AudioSegment
-        audio_completo = None
-        
-        for index, bloco in enumerate(blocos):
-            progresso = (index + 1) / len(blocos)
-            placeholder_progresso_audio.progress(progresso)
-            
-            if bloco.strip():
-                tts = gTTS(text=bloco, lang=lang_audio, slow=False)
-                fp_temp = io.BytesIO()
-                tts.write_to_fp(fp_temp)
-                fp_temp.seek(0)
-    
-        # Se der erro com pydub, volta para método simples (uma chamada só)
-        tts = gTTS(text=texto[:5000], lang=lang_audio, slow=False)  # Primeiros 5000 chars
-        tts.write_to_fp(arquivo_saida)
-        
-    except:
-        # Fallback: gera áudio do texto inteiro (limita a 5000 chars)
         tts = gTTS(text=texto[:5000], lang=lang_audio, slow=False)
+        tts.write_to_fp(arquivo_saida)
+    except Exception as e:
+        st.error(f"❌ Erro ao gerar áudio: {e}")
+        tts = gTTS(text="Erro ao gerar áudio", lang='pt', slow=False)
         tts.write_to_fp(arquivo_saida)
     
     placeholder_progresso_audio.empty()
@@ -209,21 +183,18 @@ with col1:
     st.header("1️⃣ Upload do Arquivo")
     uploaded_file = st.file_input(
         "Suporta: PDF, DOCX, HTML e TXT",
-        type=["pdf", "docx", "html", "txt"]
+        type=["pdf", "docx", "html", "txt"],
+        key="file_uploader"
     )
-    key="file_uploader"
-)
     
     texto_extraido = ""
     
     if uploaded_file is not None:
         nome_arquivo = uploaded_file.name
-        hash_arquivo = f"{nome_arquivo}_{uploaded_file.size}"
         
         st.success(f"✅ Arquivo carregado: {nome_arquivo}")
         st.info(f"📏 Tamanho: {uploaded_file.size / 1024:.2f} KB")
         
-        # Identifica o tipo de arquivo e processa
         if nome_arquivo.endswith(".txt"):
             texto_extraido = extrair_txt(uploaded_file)
         elif nome_arquivo.endswith(".pdf"):
@@ -233,14 +204,16 @@ with col1:
         elif nome_arquivo.endswith(".html"):
             texto_extraido = extrair_html(uploaded_file)
         
-        # Exibe estatísticas
         num_blocos = len(dividir_em_blocos(texto_extraido, 3500))
         st.metric("📊 Estatísticas do Texto", f"{len(texto_extraido):,} caracteres em {num_blocos} blocos")
         
-        # Preview do texto
-        st.text_area("📖 Prévia do Texto Extraído (primeiros 1000 chars):", 
-                     texto_extraido[:1000] + "..." if len(texto_extraido) > 1000 else texto_extraido, 
-                     height=200, disabled=True)
+        preview_text = texto_extraido[:1000] + "..." if len(texto_extraido) > 1000 else texto_extraido
+        st.text_area(
+            "📖 Prévia do Texto Extraído (primeiros 1000 chars):",
+            preview_text,
+            height=200,
+            disabled=True
+        )
 
 # ============================================================
 # COLUNA DIREITA: Ferramentas e Saída
@@ -250,7 +223,6 @@ with col2:
     st.header("2️⃣ Ferramentas e Saída")
     
     if texto_extraido:
-        # Abas para organizar funcionalidades
         tab1, tab2, tab3 = st.tabs(["🌍 Tradução", "🔊 Áudio", "📚 Histórico"])
         
         # ========== ABA 1: TRADUÇÃO ==========
@@ -260,7 +232,13 @@ with col2:
             idioma_destino = st.selectbox(
                 "Traduzir para:",
                 options=["en", "es", "pt", "fr", "it"],
-                format_func=lambda x: {"en": "🇺🇸 Inglês", "es": "🇪🇸 Espanhol", "pt": "🇧🇷 Português", "fr": "🇫🇷 Francês", "it": "🇮🇹 Italiano"}[x],
+                format_func=lambda x: {
+                    "en": "🇺🇸 Inglês",
+                    "es": "🇪🇸 Espanhol",
+                    "pt": "🇧🇷 Português",
+                    "fr": "🇫🇷 Francês",
+                    "it": "🇮🇹 Italiano"
+                }[x],
                 key="select_idioma"
             )
             
@@ -282,7 +260,6 @@ with col2:
                         texto_traduzido = traduzir_com_chunking(texto_extraido, idioma_destino)
                         st.session_state['texto_resultado'] = texto_traduzido
                         
-                        # Salva no cache
                         cache = st.session_state['cache_persistente']
                         cache_key = f"{len(texto_extraido)}_{idioma_destino}"
                         cache[cache_key] = {
@@ -293,36 +270,32 @@ with col2:
                         st.session_state['cache_persistente'] = cache
                         salvar_cache(cache)
                         
-                        st.success(f"✨ Sucesso! Documento traduzido em {len(dividir_em_blocos(texto_extraido, 3500))} blocos.")
+                        num_blocos = len(dividir_em_blocos(texto_extraido, 3500))
+                        st.success(f"✨ Sucesso! Documento traduzido em {num_blocos} blocos.")
                         
                     except Exception as e:
                         st.error(f"❌ Erro técnico na API de Tradução: {e}")
             
-            # Mostra resultado
             if 'texto_resultado' in st.session_state:
                 resultado_final = st.session_state['texto_resultado']
                 st.text_area("📄 Resultado da Tradução:", resultado_final, height=250, disabled=True)
-                
-                # Botão para copiar
                 st.caption("💡 Dica: Você pode selecionar e copiar o texto diretamente da caixa acima")
-                
+        
         # ========== ABA 2: ÁUDIO ==========
         with tab2:
             st.write("### 🔊 Conversão para Áudio")
             
             if 'texto_resultado' in st.session_state:
                 texto_para_audio = st.session_state['texto_resultado']
-                label_audio = "Gerar Áudio da Tradução"
                 idioma_audio = idioma_destino
             else:
                 texto_para_audio = texto_extraido
-                label_audio = "Gerar Áudio do Texto Original"
-                idioma_audio = 'pt'  # Padrão português
+                idioma_audio = 'pt'
             
             st.info(f"📢 Será gerado áudio em: {'Português' if idioma_audio == 'pt' else 'Outro idioma'}")
             st.warning("⚠️ Nota: Para textos muito longos, apenas os primeiros 5000 caracteres serão convertidos em áudio")
             
-            if st.button("🎤 Gerar Áudio", type="primary", use_container_width=True):
+            if st.button("🎤 Gerar Áudio", type="primary", use_container_width=True, key="btn_audio"):
                 with st.spinner("🎵 Gerando arquivo de voz..."):
                     try:
                         arquivo_audio = gerar_audio_com_chunking(texto_para_audio, lang_audio=idioma_audio)
