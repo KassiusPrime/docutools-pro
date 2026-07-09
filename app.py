@@ -1,15 +1,29 @@
 import io
+import os
 import re
+import html
 import zipfile
 from datetime import datetime
 
 import streamlit as st
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+import numpy as np
+import cv2
+import pytesseract
+from pdf2image import convert_from_bytes
+
 from pypdf import PdfReader, PdfWriter
 from docx import Document
 from deep_translator import GoogleTranslator
 from gtts import gTTS
+
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 
 try:
@@ -19,21 +33,380 @@ except Exception:
     pass
 
 
+# ============================================================
+# Configuração geral
+# ============================================================
+
 st.set_page_config(
     page_title="DocuTools Pro",
-    page_icon="🧰",
+    page_icon="📄",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-
 APP_NAME = "DocuTools Pro"
+APP_TAGLINE = "Converta, traduza, digitalize e organize documentos em segundos."
 MAX_FILE_SIZE_MB = 50
+MAX_OCR_PAGES = 10
 
 
-# =========================
+# ============================================================
+# Lucide Icons via SVG inline
+# ============================================================
+
+LUCIDE_ICONS = {
+    "file-text": """
+    <svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>
+        <path d="M14 2v4a2 2 0 0 0 2 2h4"/>
+        <path d="M10 9H8"/>
+        <path d="M16 13H8"/>
+        <path d="M16 17H8"/>
+    </svg>
+    """,
+    "languages": """
+    <svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m5 8 6 6"/>
+        <path d="m4 14 6-6 2-3"/>
+        <path d="M2 5h12"/>
+        <path d="M7 2h1"/>
+        <path d="m22 22-5-10-5 10"/>
+        <path d="M14 18h6"/>
+    </svg>
+    """,
+    "files": """
+    <svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 7h-3a2 2 0 0 1-2-2V2"/>
+        <path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l4 4v10a2 2 0 0 1-2 2Z"/>
+        <path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8"/>
+    </svg>
+    """,
+    "scissors": """
+    <svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="6" cy="6" r="3"/>
+        <path d="M8.12 8.12 12 12"/>
+        <path d="M20 4 8.12 15.88"/>
+        <circle cx="6" cy="18" r="3"/>
+        <path d="M14.8 14.8 20 20"/>
+    </svg>
+    """,
+    "image": """
+    <svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>
+        <circle cx="9" cy="9" r="2"/>
+        <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>
+    </svg>
+    """,
+    "wand": """
+    <svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M15 4V2"/>
+        <path d="M15 16v-2"/>
+        <path d="M8 9h2"/>
+        <path d="M20 9h2"/>
+        <path d="M17.8 11.8 19 13"/>
+        <path d="M15 9h0"/>
+        <path d="M17.8 6.2 19 5"/>
+        <path d="m3 21 9-9"/>
+        <path d="M12.2 6.2 11 5"/>
+    </svg>
+    """,
+    "repeat": """
+    <svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m17 2 4 4-4 4"/>
+        <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
+        <path d="m7 22-4-4 4-4"/>
+        <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+    </svg>
+    """,
+    "maximize": """
+    <svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8 3H5a2 2 0 0 0-2 2v3"/>
+        <path d="M21 8V5a2 2 0 0 0-2-2h-3"/>
+        <path d="M3 16v3a2 2 0 0 0 2 2h3"/>
+        <path d="M16 21h3a2 2 0 0 0 2-2v-3"/>
+    </svg>
+    """,
+    "volume": """
+    <svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+        <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+        <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+    </svg>
+    """,
+    "scan": """
+    <svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
+        <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
+        <path d="M21 17v2a2 2 0 0 1-2 2h-2"/>
+        <path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
+        <path d="M7 8h10"/>
+        <path d="M7 12h10"/>
+        <path d="M7 16h6"/>
+    </svg>
+    """,
+    "camera": """
+    <svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/>
+        <circle cx="12" cy="13" r="3"/>
+    </svg>
+    """
+}
+
+
+def lucide_icon(name, size=24, color="#2563EB"):
+    svg = LUCIDE_ICONS.get(name, "")
+    return svg.format(size=size, color=color)
+
+
+# ============================================================
+# CSS
+# ============================================================
+
+DOCUTOOLS_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+}
+
+.main {
+    background: #F8FAFC;
+}
+
+.dt-hero {
+    background: linear-gradient(135deg, #2563EB 0%, #7C3AED 100%);
+    color: white;
+    padding: 2rem;
+    border-radius: 24px;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 18px 40px rgba(37, 99, 235, 0.24);
+}
+
+.dt-hero h1 {
+    margin: 0;
+    font-size: 2rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+}
+
+.dt-hero p {
+    margin-top: 0.45rem;
+    font-size: 1rem;
+    opacity: 0.95;
+}
+
+.dt-card {
+    background: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 20px;
+    padding: 1.15rem;
+    min-height: 178px;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+    transition: all 0.18s ease;
+}
+
+.dt-card:hover {
+    transform: translateY(-2px);
+    border-color: #2563EB;
+    box-shadow: 0 18px 32px rgba(37, 99, 235, 0.14);
+}
+
+.dt-icon-wrap {
+    width: 46px;
+    height: 46px;
+    border-radius: 14px;
+    background: #EFF6FF;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 0.85rem;
+}
+
+.dt-card h3 {
+    color: #0F172A;
+    font-size: 1rem;
+    font-weight: 750;
+    margin: 0 0 0.35rem 0;
+}
+
+.dt-card p {
+    color: #64748B;
+    font-size: 0.875rem;
+    line-height: 1.45;
+    margin: 0;
+}
+
+.dt-badge {
+    display: inline-block;
+    padding: 0.22rem 0.5rem;
+    border-radius: 999px;
+    background: #EEF2FF;
+    color: #3730A3;
+    font-size: 0.72rem;
+    font-weight: 700;
+    margin-right: 0.25rem;
+    margin-top: 0.55rem;
+}
+
+.dt-section-title {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    margin-top: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.dt-section-title h2 {
+    margin: 0;
+    color: #0F172A;
+    font-size: 1.35rem;
+    font-weight: 800;
+}
+
+.dt-small-muted {
+    color: #64748B;
+    font-size: 0.88rem;
+    margin-top: -0.5rem;
+    margin-bottom: 1rem;
+}
+
+.dt-step-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.dt-step {
+    background: white;
+    border: 1px solid #E2E8F0;
+    border-radius: 14px;
+    padding: 0.8rem 1rem;
+    color: #334155;
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.stButton button {
+    border-radius: 12px;
+    font-weight: 700;
+}
+</style>
+"""
+
+st.markdown(DOCUTOOLS_CSS, unsafe_allow_html=True)
+
+
+# ============================================================
+# Interface helpers
+# ============================================================
+
+def render_hero():
+    st.markdown(
+        f"""
+        <div class="dt-hero">
+            <div style="display:flex; align-items:center; gap:0.75rem;">
+                {lucide_icon("file-text", size=38, color="#FFFFFF")}
+                <h1>DocuTools Pro</h1>
+            </div>
+            <p>{APP_TAGLINE}</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_section_title(icon, title, subtitle=None, color="#2563EB"):
+    subtitle_html = f'<p class="dt-small-muted">{html.escape(subtitle)}</p>' if subtitle else ""
+    st.markdown(
+        f"""
+        <div class="dt-section-title">
+            {lucide_icon(icon, size=29, color=color)}
+            <h2>{html.escape(title)}</h2>
+        </div>
+        {subtitle_html}
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_tool_card(icon, title, description, badges=None, color="#2563EB"):
+    badges = badges or []
+    badge_html = "".join(
+        f'<span class="dt-badge">{html.escape(str(badge))}</span>'
+        for badge in badges
+    )
+
+    st.markdown(
+        f"""
+        <div class="dt-card">
+            <div class="dt-icon-wrap">
+                {lucide_icon(icon, size=26, color=color)}
+            </div>
+            <h3>{html.escape(title)}</h3>
+            <p>{html.escape(description)}</p>
+            <div>{badge_html}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_steps():
+    st.markdown(
+        """
+        <div class="dt-step-grid">
+            <div class="dt-step">1. Enviar arquivo</div>
+            <div class="dt-step">2. Extrair/OCR</div>
+            <div class="dt-step">3. Traduzir</div>
+            <div class="dt-step">4. Baixar documento</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+# ============================================================
+# Domínios de idiomas
+# ============================================================
+
+LANGUAGES = {
+    "Detectar automaticamente": "auto",
+    "Português": "pt",
+    "Inglês": "en",
+    "Espanhol": "es",
+    "Francês": "fr",
+    "Italiano": "it",
+    "Alemão": "de",
+    "Holandês": "nl",
+    "Russo": "ru",
+    "Árabe": "ar",
+    "Hindi": "hi",
+    "Japonês": "ja",
+    "Coreano": "ko",
+    "Chinês simplificado": "zh-CN",
+    "Chinês tradicional": "zh-TW",
+    "Turco": "tr",
+    "Polonês": "pl",
+    "Ucraniano": "uk",
+    "Sueco": "sv",
+    "Norueguês": "no",
+    "Dinamarquês": "da"
+}
+
+OCR_LANGUAGES = {
+    "Português": "por",
+    "Inglês": "eng",
+    "Espanhol": "spa",
+    "Francês": "fra",
+    "Alemão": "deu"
+}
+
+
+# ============================================================
 # Funções auxiliares
-# =========================
+# ============================================================
 
 def now_suffix():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -41,6 +414,7 @@ def now_suffix():
 
 def sanitize_filename(name):
     name = name or "arquivo"
+    name = os.path.splitext(name)[0]
     name = re.sub(r"[^\w\-. ]+", "", name, flags=re.UNICODE)
     name = name.strip().replace(" ", "_")
     return name or "arquivo"
@@ -74,6 +448,404 @@ def make_download_buffer(data):
     buffer.seek(0)
     return buffer
 
+
+def chunk_text(text, max_chars=4500):
+    text = text.strip()
+
+    if not text:
+        return []
+
+    chunks = []
+    current = ""
+
+    for paragraph in text.splitlines():
+        paragraph = paragraph.strip()
+
+        if not paragraph:
+            continue
+
+        if len(paragraph) > max_chars:
+            if current:
+                chunks.append(current.strip())
+                current = ""
+
+            for i in range(0, len(paragraph), max_chars):
+                chunks.append(paragraph[i:i + max_chars])
+
+            continue
+
+        if len(current) + len(paragraph) + 1 <= max_chars:
+            current += paragraph + "\n"
+        else:
+            if current:
+                chunks.append(current.strip())
+            current = paragraph + "\n"
+
+    if current.strip():
+        chunks.append(current.strip())
+
+    return chunks
+
+
+def protect_glossary_terms(text, glossary_terms):
+    mapping = {}
+
+    for idx, term in enumerate(glossary_terms):
+        term = term.strip()
+        if not term:
+            continue
+
+        placeholder = f"ZXQTERM{idx}ZXQ"
+        mapping[placeholder] = term
+        text = text.replace(term, placeholder)
+
+    return text, mapping
+
+
+def restore_glossary_terms(text, mapping):
+    for placeholder, term in mapping.items():
+        text = text.replace(placeholder, term)
+    return text
+
+
+def translate_text(text, source_lang, target_lang, glossary_terms=None):
+    glossary_terms = glossary_terms or []
+    protected_text, mapping = protect_glossary_terms(text, glossary_terms)
+
+    chunks = chunk_text(protected_text)
+    translated_parts = []
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    total_chunks = len(chunks)
+
+    for index, chunk in enumerate(chunks, start=1):
+        status.info(f"Traduzindo parte {index} de {total_chunks}...")
+
+        translated = GoogleTranslator(
+            source=source_lang,
+            target=target_lang
+        ).translate(chunk)
+
+        translated = restore_glossary_terms(translated, mapping)
+        translated_parts.append(translated)
+
+        progress.progress(index / total_chunks)
+
+    progress.empty()
+    status.success("Tradução concluída.")
+
+    return "\n\n".join(translated_parts).strip()
+
+
+# ============================================================
+# PDF, DOCX e TXT
+# ============================================================
+
+def extract_text_from_pdf(uploaded_file):
+    valid, error = validate_file_size(uploaded_file)
+
+    if not valid:
+        raise ValueError(error)
+
+    file_bytes = get_file_bytes(uploaded_file)
+    reader = PdfReader(io.BytesIO(file_bytes))
+
+    pages_text = []
+
+    for index, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        if text.strip():
+            pages_text.append(f"--- Página {index} ---\n{text}")
+
+    return "\n\n".join(pages_text).strip()
+
+
+def extract_text_from_docx(uploaded_file):
+    valid, error = validate_file_size(uploaded_file)
+
+    if not valid:
+        raise ValueError(error)
+
+    file_bytes = get_file_bytes(uploaded_file)
+    doc = Document(io.BytesIO(file_bytes))
+
+    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+
+    tables_text = []
+
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            tables_text.append(" | ".join(cells))
+
+    all_text = paragraphs + tables_text
+    return "\n".join(all_text).strip()
+
+
+def extract_text_from_txt(uploaded_file):
+    valid, error = validate_file_size(uploaded_file)
+
+    if not valid:
+        raise ValueError(error)
+
+    file_bytes = get_file_bytes(uploaded_file)
+
+    try:
+        return file_bytes.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return file_bytes.decode("latin-1").strip()
+
+
+# ============================================================
+# OCR
+# ============================================================
+
+def preprocess_image_for_ocr(image):
+    image = image.convert("RGB")
+    img_array = np.array(image)
+
+    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+
+    gray = cv2.bilateralFilter(gray, 9, 75, 75)
+
+    threshold = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        2
+    )
+
+    return Image.fromarray(threshold)
+
+
+def ocr_image(image, ocr_language="Português"):
+    lang_code = OCR_LANGUAGES.get(ocr_language, "por")
+    processed = preprocess_image_for_ocr(image)
+
+    text = pytesseract.image_to_string(
+        processed,
+        lang=lang_code
+    )
+
+    return text.strip()
+
+
+def ocr_pdf(uploaded_file, ocr_language="Português", dpi=220, max_pages=MAX_OCR_PAGES):
+    file_bytes = get_file_bytes(uploaded_file)
+
+    pages = convert_from_bytes(
+        file_bytes,
+        dpi=dpi,
+        first_page=1,
+        last_page=max_pages
+    )
+
+    extracted_pages = []
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    total_pages = len(pages)
+
+    for index, page_image in enumerate(pages, start=1):
+        status.info(f"Aplicando OCR na página {index} de {total_pages}...")
+
+        page_text = ocr_image(
+            page_image,
+            ocr_language=ocr_language
+        )
+
+        if page_text:
+            extracted_pages.append(f"--- Página {index} ---\n{page_text}")
+
+        progress.progress(index / total_pages)
+
+    progress.empty()
+    status.success("OCR concluído.")
+
+    return "\n\n".join(extracted_pages).strip()
+
+
+def extract_text_from_pdf_auto(uploaded_file, ocr_language="Português", processing_mode="Automático"):
+    if processing_mode == "Forçar OCR":
+        return ocr_pdf(uploaded_file, ocr_language=ocr_language)
+
+    text = extract_text_from_pdf(uploaded_file)
+
+    if processing_mode == "Somente texto extraível":
+        return text
+
+    if len(text.strip()) >= 80:
+        return text
+
+    st.warning(
+        "Pouco ou nenhum texto detectado no PDF. "
+        "Aplicando OCR automaticamente."
+    )
+
+    return ocr_pdf(uploaded_file, ocr_language=ocr_language)
+
+
+def extract_text_from_document(uploaded_file, ocr_language="Português", processing_mode="Automático"):
+    extension = uploaded_file.name.lower().split(".")[-1]
+
+    if extension == "pdf":
+        return extract_text_from_pdf_auto(
+            uploaded_file,
+            ocr_language=ocr_language,
+            processing_mode=processing_mode
+        )
+
+    if extension == "docx":
+        return extract_text_from_docx(uploaded_file)
+
+    if extension == "txt":
+        return extract_text_from_txt(uploaded_file)
+
+    if extension in ["png", "jpg", "jpeg", "webp", "heic", "heif"]:
+        image = open_image_from_upload(uploaded_file)
+        return ocr_image(image, ocr_language=ocr_language)
+
+    raise ValueError("Formato não suportado.")
+
+
+# ============================================================
+# Geração de documentos
+# ============================================================
+
+def create_translated_docx(
+    title,
+    original_filename,
+    source_label,
+    target_label,
+    mode,
+    translated_text,
+    original_text=None
+):
+    doc = Document()
+
+    doc.add_heading(title, level=1)
+    doc.add_paragraph(f"Arquivo original: {original_filename}")
+    doc.add_paragraph(f"Idioma de origem: {source_label}")
+    doc.add_paragraph(f"Idioma de destino: {target_label}")
+    doc.add_paragraph(f"Modo: {mode}")
+    doc.add_paragraph(f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    doc.add_paragraph("")
+
+    if mode == "Bilíngue" and original_text:
+        doc.add_heading("Texto original", level=2)
+
+        for paragraph in original_text.split("\n"):
+            if paragraph.strip():
+                doc.add_paragraph(paragraph.strip())
+
+        doc.add_page_break()
+
+        doc.add_heading("Texto traduzido", level=2)
+
+        for paragraph in translated_text.split("\n"):
+            if paragraph.strip():
+                doc.add_paragraph(paragraph.strip())
+    else:
+        doc.add_heading("Texto traduzido", level=2)
+
+        if mode == "Corporativo":
+            doc.add_paragraph(
+                "Observação: tradução gerada com foco em clareza, estrutura documental e leitura profissional."
+            )
+
+        for paragraph in translated_text.split("\n"):
+            if paragraph.strip():
+                doc.add_paragraph(paragraph.strip())
+
+    output = io.BytesIO()
+    doc.save(output)
+    output.seek(0)
+
+    return output
+
+
+def register_pdf_font():
+    possible_fonts = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+
+    for font_path in possible_fonts:
+        if os.path.exists(font_path):
+            pdfmetrics.registerFont(TTFont("DocuToolsFont", font_path))
+            return "DocuToolsFont"
+
+    return "Helvetica"
+
+
+def create_translated_pdf(
+    title,
+    original_filename,
+    source_label,
+    target_label,
+    mode,
+    translated_text
+):
+    output = io.BytesIO()
+    font_name = register_pdf_font()
+
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=A4,
+        rightMargin=2 * cm,
+        leftMargin=2 * cm,
+        topMargin=2 * cm,
+        bottomMargin=2 * cm
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "DocuToolsTitle",
+        parent=styles["Title"],
+        fontName=font_name,
+        fontSize=18,
+        leading=22,
+        spaceAfter=14
+    )
+
+    normal_style = ParagraphStyle(
+        "DocuToolsNormal",
+        parent=styles["Normal"],
+        fontName=font_name,
+        fontSize=10.5,
+        leading=15,
+        spaceAfter=8
+    )
+
+    story = []
+
+    story.append(Paragraph(html.escape(title), title_style))
+    story.append(Paragraph(f"<b>Arquivo original:</b> {html.escape(original_filename)}", normal_style))
+    story.append(Paragraph(f"<b>Idioma de origem:</b> {html.escape(source_label)}", normal_style))
+    story.append(Paragraph(f"<b>Idioma de destino:</b> {html.escape(target_label)}", normal_style))
+    story.append(Paragraph(f"<b>Modo:</b> {html.escape(mode)}", normal_style))
+    story.append(Spacer(1, 12))
+
+    for paragraph in translated_text.split("\n"):
+        paragraph = paragraph.strip()
+        if paragraph:
+            story.append(Paragraph(html.escape(paragraph), normal_style))
+
+    doc.build(story)
+    output.seek(0)
+
+    return output
+
+
+# ============================================================
+# Imagens
+# ============================================================
 
 def open_image_from_upload(uploaded_file):
     valid, error = validate_file_size(uploaded_file)
@@ -151,86 +923,6 @@ def apply_background(image, option, custom_color="#ffffff"):
     return background.convert("RGB")
 
 
-def chunk_text(text, max_chars=4500):
-    text = text.strip()
-
-    if not text:
-        return []
-
-    chunks = []
-    current = ""
-
-    for paragraph in text.splitlines():
-        paragraph = paragraph.strip()
-
-        if not paragraph:
-            continue
-
-        if len(paragraph) > max_chars:
-            if current:
-                chunks.append(current.strip())
-                current = ""
-
-            for i in range(0, len(paragraph), max_chars):
-                chunks.append(paragraph[i:i + max_chars])
-
-            continue
-
-        if len(current) + len(paragraph) + 1 <= max_chars:
-            current += paragraph + "\n"
-        else:
-            if current:
-                chunks.append(current.strip())
-
-            current = paragraph + "\n"
-
-    if current.strip():
-        chunks.append(current.strip())
-
-    return chunks
-
-
-def extract_text_from_pdf(uploaded_file):
-    valid, error = validate_file_size(uploaded_file)
-
-    if not valid:
-        raise ValueError(error)
-
-    file_bytes = get_file_bytes(uploaded_file)
-    reader = PdfReader(io.BytesIO(file_bytes))
-
-    pages_text = []
-
-    for index, page in enumerate(reader.pages, start=1):
-        text = page.extract_text() or ""
-        pages_text.append(f"\n\n--- Página {index} ---\n{text}")
-
-    return "\n".join(pages_text).strip()
-
-
-def extract_text_from_docx(uploaded_file):
-    valid, error = validate_file_size(uploaded_file)
-
-    if not valid:
-        raise ValueError(error)
-
-    file_bytes = get_file_bytes(uploaded_file)
-    doc = Document(io.BytesIO(file_bytes))
-
-    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-
-    tables_text = []
-
-    for table in doc.tables:
-        for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells]
-            tables_text.append(" | ".join(cells))
-
-    all_text = paragraphs + tables_text
-
-    return "\n".join(all_text).strip()
-
-
 def text_stats(text):
     chars = len(text)
     chars_no_spaces = len(text.replace(" ", ""))
@@ -247,100 +939,417 @@ def text_stats(text):
     }
 
 
-# =========================
+# ============================================================
 # Sidebar
-# =========================
+# ============================================================
 
-st.sidebar.title("🧰 DocuTools Pro")
-st.sidebar.caption("Ferramentas para PDF, Word, imagens, texto e áudio.")
+st.sidebar.markdown("## 📄✨ DocuTools Pro")
+st.sidebar.caption("Documentos, imagens, OCR, tradução e áudio.")
 
 menu = st.sidebar.radio(
-    "Escolha uma ferramenta",
+    "Navegação",
     [
-        "Início",
-        "PDF - Juntar PDFs",
-        "PDF - Dividir PDF",
-        "PDF - Extrair texto",
-        "Word - Extrair texto DOCX",
-        "Imagem - Remover fundo",
-        "Imagem - Converter imagem",
-        "Imagem - Redimensionar e comprimir",
-        "Imagem - Imagens para PDF",
-        "Texto - Traduzir",
-        "Texto - Utilitários",
-        "Áudio - Texto para MP3"
+        "🏠 Início",
+        "🌐 Traduzir Documento",
+        "📷 Digitalizar documento",
+        "📄 PDF - Juntar PDFs",
+        "✂️ PDF - Dividir PDF",
+        "🔎 PDF - Extrair texto",
+        "📝 Word - Extrair texto DOCX",
+        "🪄 Imagem - Remover fundo",
+        "🔁 Imagem - Converter imagem",
+        "📐 Imagem - Redimensionar e comprimir",
+        "🖼️ Imagem - Imagens para PDF",
+        "🔤 Texto - Utilitários",
+        "🔊 Áudio - Texto para MP3"
     ]
 )
 
 st.sidebar.divider()
 st.sidebar.info(
-    "Para melhor compatibilidade com HEIC/HEIF, mantenha o arquivo "
-    "`packages.txt` no projeto."
+    "Para OCR funcionar no Streamlit Cloud, mantenha o `packages.txt` com Tesseract e Poppler."
 )
 
 
-# =========================
+# ============================================================
 # Início
-# =========================
+# ============================================================
 
-if menu == "Início":
-    st.title("🧰 DocuTools Pro")
-    st.subheader("Ferramentas rápidas para documentos, imagens, texto e áudio.")
+if menu == "🏠 Início":
+    render_hero()
 
-    st.write(
-        "Escolha uma ferramenta na barra lateral para começar. "
-        "Você pode processar PDFs, DOCX, imagens, textos e áudio diretamente pelo navegador."
+    render_section_title(
+        icon="languages",
+        title="Ferramentas principais",
+        subtitle="Traduza, digitalize, converta e organize arquivos em poucos cliques.",
+        color="#2563EB"
     )
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.info("📄 **PDF**\n\nJuntar, dividir e extrair texto de PDFs.")
+        render_tool_card(
+            icon="languages",
+            title="Traduzir Documento",
+            description="Traduza PDF, DOCX, TXT e imagens com OCR automático.",
+            badges=["PDF", "DOCX", "TXT", "OCR"],
+            color="#2563EB"
+        )
 
     with col2:
-        st.success("🖼️ **Imagens**\n\nRemover fundo, converter, redimensionar e gerar PDF.")
+        render_tool_card(
+            icon="scan",
+            title="Digitalizar Documento",
+            description="Use câmera ou imagem para gerar PDF e extrair texto.",
+            badges=["Câmera", "OCR", "PDF"],
+            color="#0891B2"
+        )
 
     with col3:
-        st.warning("🔤 **Texto e Áudio**\n\nTraduzir, limpar texto, contar palavras e gerar MP3.")
+        render_tool_card(
+            icon="files",
+            title="Ferramentas PDF",
+            description="Junte, divida e extraia texto de arquivos PDF.",
+            badges=["PDF"],
+            color="#7C3AED"
+        )
 
-    st.divider()
+    col4, col5, col6 = st.columns(3)
 
-    st.markdown(
-        """
-        ### Formatos suportados
+    with col4:
+        render_tool_card(
+            icon="wand",
+            title="Remover Fundo",
+            description="Remova fundos de PNG, JPG, WEBP, HEIC e HEIF.",
+            badges=["PNG", "JPG", "HEIC"],
+            color="#16A34A"
+        )
 
-        **PDF**
-        - `.pdf`
+    with col5:
+        render_tool_card(
+            icon="repeat",
+            title="Converter Imagem",
+            description="Converta imagens entre PNG, JPG e WEBP.",
+            badges=["PNG", "JPG", "WEBP"],
+            color="#F59E0B"
+        )
 
-        **Word**
-        - `.docx`
+    with col6:
+        render_tool_card(
+            icon="volume",
+            title="Texto para MP3",
+            description="Transforme textos em áudio MP3.",
+            badges=["MP3"],
+            color="#DC2626"
+        )
 
-        **Imagens**
-        - `.png`
-        - `.jpg`
-        - `.jpeg`
-        - `.webp`
-        - `.heic`
-        - `.heif`
 
-        **Saídas**
-        - PDF
-        - TXT
-        - PNG
-        - JPG
-        - WEBP
-        - MP3
-        """
+# ============================================================
+# Traduzir Documento
+# ============================================================
+
+elif menu == "🌐 Traduzir Documento":
+    render_section_title(
+        icon="languages",
+        title="Traduzir Documento",
+        subtitle="Traduza PDF, DOCX, TXT ou imagens. PDFs escaneados usam OCR automaticamente.",
+        color="#2563EB"
     )
 
+    render_steps()
 
-# =========================
+    st.info(
+        f"O OCR está limitado às primeiras {MAX_OCR_PAGES} páginas para manter estabilidade no Streamlit Cloud."
+    )
+
+    uploaded_file = st.file_uploader(
+        "Envie um documento ou imagem",
+        type=["pdf", "docx", "txt", "png", "jpg", "jpeg", "webp", "heic", "heif"]
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        source_label = st.selectbox(
+            "Idioma de origem",
+            list(LANGUAGES.keys()),
+            index=0
+        )
+
+    with col2:
+        target_options = [k for k in LANGUAGES.keys() if k != "Detectar automaticamente"]
+        target_label = st.selectbox(
+            "Idioma de destino",
+            target_options,
+            index=1
+        )
+
+    with col3:
+        output_format = st.selectbox(
+            "Formato de saída",
+            ["DOCX", "TXT", "PDF"]
+        )
+
+    col4, col5, col6 = st.columns(3)
+
+    with col4:
+        translation_mode = st.selectbox(
+            "Modo de tradução",
+            ["Simples", "Corporativo", "Bilíngue"]
+        )
+
+    with col5:
+        processing_mode = st.selectbox(
+            "Modo de processamento",
+            ["Automático", "Somente texto extraível", "Forçar OCR"]
+        )
+
+    with col6:
+        ocr_language = st.selectbox(
+            "Idioma do OCR",
+            list(OCR_LANGUAGES.keys()),
+            index=0
+        )
+
+    show_preview = st.checkbox("Mostrar prévia do texto extraído", value=True)
+
+    glossary_input = st.text_area(
+        "Termos que devem ser preservados, um por linha",
+        value="DocuTools\nMicrosoft 365\nPower BI\nSharePoint",
+        height=100
+    )
+
+    glossary_terms = [
+        term.strip()
+        for term in glossary_input.splitlines()
+        if term.strip()
+    ]
+
+    if uploaded_file:
+        base_name = sanitize_filename(uploaded_file.name)
+
+        if st.button("🌐 Traduzir documento", type="primary"):
+            try:
+                source_lang = LANGUAGES[source_label]
+                target_lang = LANGUAGES[target_label]
+
+                with st.spinner("Extraindo texto do arquivo..."):
+                    original_text = extract_text_from_document(
+                        uploaded_file,
+                        ocr_language=ocr_language,
+                        processing_mode=processing_mode
+                    )
+
+                if not original_text.strip():
+                    st.error(
+                        "Nenhum texto foi encontrado. "
+                        "Tente usar o modo 'Forçar OCR' ou envie uma imagem mais nítida."
+                    )
+                    st.stop()
+
+                st.success("Texto extraído com sucesso.")
+
+                if show_preview:
+                    with st.expander("Prévia do texto extraído", expanded=True):
+                        st.text_area(
+                            "Texto extraído",
+                            original_text[:5000],
+                            height=260
+                        )
+
+                translated_text = translate_text(
+                    text=original_text,
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    glossary_terms=glossary_terms
+                )
+
+                st.success("Documento traduzido com sucesso.")
+
+                st.subheader("Prévia da tradução")
+
+                st.text_area(
+                    "Texto traduzido",
+                    translated_text[:5000],
+                    height=280
+                )
+
+                title = "Documento Traduzido - DocuTools Pro"
+
+                if output_format == "DOCX":
+                    output = create_translated_docx(
+                        title=title,
+                        original_filename=uploaded_file.name,
+                        source_label=source_label,
+                        target_label=target_label,
+                        mode=translation_mode,
+                        translated_text=translated_text,
+                        original_text=original_text
+                    )
+
+                    st.download_button(
+                        label="⬇️ Baixar DOCX traduzido",
+                        data=output,
+                        file_name=f"{base_name}_traduzido_{target_lang}_{now_suffix()}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
+
+                elif output_format == "TXT":
+                    txt_content = (
+                        f"{title}\n\n"
+                        f"Arquivo original: {uploaded_file.name}\n"
+                        f"Idioma de origem: {source_label}\n"
+                        f"Idioma de destino: {target_label}\n"
+                        f"Modo: {translation_mode}\n"
+                        f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n\n"
+                        f"{translated_text}"
+                    )
+
+                    st.download_button(
+                        label="⬇️ Baixar TXT traduzido",
+                        data=txt_content.encode("utf-8"),
+                        file_name=f"{base_name}_traduzido_{target_lang}_{now_suffix()}.txt",
+                        mime="text/plain"
+                    )
+
+                else:
+                    output = create_translated_pdf(
+                        title=title,
+                        original_filename=uploaded_file.name,
+                        source_label=source_label,
+                        target_label=target_label,
+                        mode=translation_mode,
+                        translated_text=translated_text
+                    )
+
+                    st.download_button(
+                        label="⬇️ Baixar PDF traduzido",
+                        data=output,
+                        file_name=f"{base_name}_traduzido_{target_lang}_{now_suffix()}.pdf",
+                        mime="application/pdf"
+                    )
+
+            except Exception as e:
+                st.error(f"Erro ao traduzir documento: {e}")
+
+
+# ============================================================
+# Digitalizar Documento
+# ============================================================
+
+elif menu == "📷 Digitalizar documento":
+    render_section_title(
+        icon="scan",
+        title="Digitalizar documento",
+        subtitle="Use câmera ou imagem para gerar PDF, aplicar melhoria visual e extrair texto por OCR.",
+        color="#0891B2"
+    )
+
+    input_mode = st.radio(
+        "Origem da imagem",
+        ["Enviar imagem", "Usar câmera"]
+    )
+
+    uploaded_image = None
+
+    if input_mode == "Enviar imagem":
+        uploaded_image = st.file_uploader(
+            "Envie uma foto ou imagem do documento",
+            type=["png", "jpg", "jpeg", "webp", "heic", "heif"]
+        )
+    else:
+        uploaded_image = st.camera_input("Fotografe o documento")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        ocr_language = st.selectbox(
+            "Idioma para OCR",
+            list(OCR_LANGUAGES.keys()),
+            index=0
+        )
+
+    with col2:
+        output_style = st.selectbox(
+            "Estilo da digitalização",
+            ["Colorido original", "Preto e branco otimizado", "Escala de cinza"]
+        )
+
+    if uploaded_image:
+        try:
+            image = open_image_from_upload(uploaded_image)
+
+            st.image(
+                image,
+                caption="Imagem original",
+                use_container_width=True
+            )
+
+            if st.button("📷 Processar digitalização", type="primary"):
+                processed = image
+
+                if output_style == "Preto e branco otimizado":
+                    processed = preprocess_image_for_ocr(image)
+
+                elif output_style == "Escala de cinza":
+                    processed = image.convert("L")
+
+                st.image(
+                    processed,
+                    caption="Documento digitalizado",
+                    use_container_width=True
+                )
+
+                pdf_buffer = io.BytesIO()
+                processed.convert("RGB").save(pdf_buffer, format="PDF")
+                pdf_buffer.seek(0)
+
+                st.download_button(
+                    label="⬇️ Baixar PDF digitalizado",
+                    data=pdf_buffer,
+                    file_name=f"documento_digitalizado_{now_suffix()}.pdf",
+                    mime="application/pdf"
+                )
+
+                with st.spinner("Extraindo texto por OCR..."):
+                    extracted_text = ocr_image(
+                        processed,
+                        ocr_language=ocr_language
+                    )
+
+                if extracted_text:
+                    st.success("Texto extraído com sucesso.")
+
+                    st.text_area(
+                        "Texto extraído",
+                        extracted_text,
+                        height=300
+                    )
+
+                    st.download_button(
+                        label="⬇️ Baixar TXT extraído",
+                        data=extracted_text.encode("utf-8"),
+                        file_name=f"ocr_documento_{now_suffix()}.txt",
+                        mime="text/plain"
+                    )
+                else:
+                    st.warning("Nenhum texto foi identificado na imagem.")
+
+        except Exception as e:
+            st.error(f"Erro ao digitalizar documento: {e}")
+
+
+# ============================================================
 # PDF - Juntar PDFs
-# =========================
+# ============================================================
 
-elif menu == "PDF - Juntar PDFs":
-    st.title("📄 Juntar PDFs")
-    st.caption("Envie dois ou mais arquivos PDF para gerar um único PDF.")
+elif menu == "📄 PDF - Juntar PDFs":
+    render_section_title(
+        icon="files",
+        title="Juntar PDFs",
+        subtitle="Envie dois ou mais PDFs para gerar um arquivo único.",
+        color="#7C3AED"
+    )
 
     uploaded_files = st.file_uploader(
         "Envie os PDFs",
@@ -351,7 +1360,7 @@ elif menu == "PDF - Juntar PDFs":
     if uploaded_files:
         st.write(f"{len(uploaded_files)} arquivo(s) selecionado(s).")
 
-        if st.button("Juntar PDFs"):
+        if st.button("📄 Juntar PDFs"):
             try:
                 writer = PdfWriter()
 
@@ -372,10 +1381,10 @@ elif menu == "PDF - Juntar PDFs":
                 writer.write(output)
                 output.seek(0)
 
-                st.success("PDFs unidos com sucesso!")
+                st.success("PDFs unidos com sucesso.")
 
                 st.download_button(
-                    label="Baixar PDF unido",
+                    label="⬇️ Baixar PDF unido",
                     data=output,
                     file_name=f"pdf_unido_{now_suffix()}.pdf",
                     mime="application/pdf"
@@ -385,13 +1394,17 @@ elif menu == "PDF - Juntar PDFs":
                 st.error(f"Erro ao juntar PDFs: {e}")
 
 
-# =========================
+# ============================================================
 # PDF - Dividir PDF
-# =========================
+# ============================================================
 
-elif menu == "PDF - Dividir PDF":
-    st.title("✂️ Dividir PDF")
-    st.caption("Extraia um intervalo ou separe todas as páginas em arquivos individuais.")
+elif menu == "✂️ PDF - Dividir PDF":
+    render_section_title(
+        icon="scissors",
+        title="Dividir PDF",
+        subtitle="Extraia um intervalo ou separe todas as páginas.",
+        color="#7C3AED"
+    )
 
     uploaded_file = st.file_uploader(
         "Envie um PDF",
@@ -439,7 +1452,7 @@ elif menu == "PDF - Dividir PDF":
                         value=total_pages
                     )
 
-                if st.button("Extrair páginas"):
+                if st.button("✂️ Extrair páginas"):
                     writer = PdfWriter()
 
                     for page_index in range(start_page - 1, end_page):
@@ -449,17 +1462,17 @@ elif menu == "PDF - Dividir PDF":
                     writer.write(output)
                     output.seek(0)
 
-                    st.success("Páginas extraídas com sucesso!")
+                    st.success("Páginas extraídas com sucesso.")
 
                     st.download_button(
-                        label="Baixar PDF extraído",
+                        label="⬇️ Baixar PDF extraído",
                         data=output,
                         file_name=f"paginas_{start_page}_a_{end_page}_{now_suffix()}.pdf",
                         mime="application/pdf"
                     )
 
             else:
-                if st.button("Separar todas as páginas"):
+                if st.button("📦 Separar todas as páginas"):
                     zip_buffer = io.BytesIO()
 
                     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
@@ -478,10 +1491,10 @@ elif menu == "PDF - Dividir PDF":
 
                     zip_buffer.seek(0)
 
-                    st.success("Páginas separadas com sucesso!")
+                    st.success("Páginas separadas com sucesso.")
 
                     st.download_button(
-                        label="Baixar ZIP com páginas separadas",
+                        label="⬇️ Baixar ZIP",
                         data=zip_buffer,
                         file_name=f"paginas_separadas_{now_suffix()}.zip",
                         mime="application/zip"
@@ -491,35 +1504,55 @@ elif menu == "PDF - Dividir PDF":
             st.error(f"Erro ao dividir PDF: {e}")
 
 
-# =========================
+# ============================================================
 # PDF - Extrair texto
-# =========================
+# ============================================================
 
-elif menu == "PDF - Extrair texto":
-    st.title("📄 Extrair texto de PDF")
-    st.caption("Extraia texto das páginas de um arquivo PDF.")
+elif menu == "🔎 PDF - Extrair texto":
+    render_section_title(
+        icon="file-text",
+        title="Extrair texto de PDF",
+        subtitle="Extraia texto comum ou aplique OCR em PDFs escaneados.",
+        color="#7C3AED"
+    )
 
     uploaded_file = st.file_uploader(
         "Envie um PDF",
         type=["pdf"]
     )
 
+    col1, col2 = st.columns(2)
+
+    with col1:
+        extraction_mode = st.selectbox(
+            "Modo de extração",
+            ["Automático", "Somente texto extraível", "Forçar OCR"]
+        )
+
+    with col2:
+        ocr_language = st.selectbox(
+            "Idioma OCR",
+            list(OCR_LANGUAGES.keys()),
+            index=0
+        )
+
     if uploaded_file:
-        if st.button("Extrair texto"):
+        if st.button("🔎 Extrair texto"):
             try:
-                text = extract_text_from_pdf(uploaded_file)
+                text = extract_text_from_pdf_auto(
+                    uploaded_file,
+                    ocr_language=ocr_language,
+                    processing_mode=extraction_mode
+                )
 
                 if not text:
-                    st.warning(
-                        "Nenhum texto foi encontrado. "
-                        "Este PDF pode ser uma digitalização em imagem."
-                    )
+                    st.warning("Nenhum texto foi encontrado.")
                 else:
-                    st.success("Texto extraído com sucesso!")
+                    st.success("Texto extraído com sucesso.")
                     st.text_area("Texto extraído", text, height=400)
 
                     st.download_button(
-                        label="Baixar TXT",
+                        label="⬇️ Baixar TXT",
                         data=make_download_buffer(text),
                         file_name=f"texto_pdf_{now_suffix()}.txt",
                         mime="text/plain"
@@ -529,13 +1562,17 @@ elif menu == "PDF - Extrair texto":
                 st.error(f"Erro ao extrair texto do PDF: {e}")
 
 
-# =========================
+# ============================================================
 # Word - Extrair texto DOCX
-# =========================
+# ============================================================
 
-elif menu == "Word - Extrair texto DOCX":
-    st.title("📝 Extrair texto de DOCX")
-    st.caption("Extraia texto de documentos Word no formato `.docx`.")
+elif menu == "📝 Word - Extrair texto DOCX":
+    render_section_title(
+        icon="file-text",
+        title="Extrair texto de DOCX",
+        subtitle="Extraia texto de documentos Word no formato DOCX.",
+        color="#2563EB"
+    )
 
     uploaded_file = st.file_uploader(
         "Envie um arquivo DOCX",
@@ -543,18 +1580,18 @@ elif menu == "Word - Extrair texto DOCX":
     )
 
     if uploaded_file:
-        if st.button("Extrair texto"):
+        if st.button("📝 Extrair texto"):
             try:
                 text = extract_text_from_docx(uploaded_file)
 
                 if not text:
                     st.warning("Nenhum texto foi encontrado no DOCX.")
                 else:
-                    st.success("Texto extraído com sucesso!")
+                    st.success("Texto extraído com sucesso.")
                     st.text_area("Texto extraído", text, height=400)
 
                     st.download_button(
-                        label="Baixar TXT",
+                        label="⬇️ Baixar TXT",
                         data=make_download_buffer(text),
                         file_name=f"texto_docx_{now_suffix()}.txt",
                         mime="text/plain"
@@ -564,15 +1601,16 @@ elif menu == "Word - Extrair texto DOCX":
                 st.error(f"Erro ao extrair texto do DOCX: {e}")
 
 
-# =========================
+# ============================================================
 # Imagem - Remover fundo
-# =========================
+# ============================================================
 
-elif menu == "Imagem - Remover fundo":
-    st.title("🖼️ Remover fundo de imagem")
-    st.caption(
-        "Envie PNG, JPG, JPEG, WEBP, HEIC ou HEIF. "
-        "A saída pode ser PNG transparente ou JPG com fundo personalizado."
+elif menu == "🪄 Imagem - Remover fundo":
+    render_section_title(
+        icon="wand",
+        title="Remover fundo de imagem",
+        subtitle="Envie PNG, JPG, JPEG, WEBP, HEIC ou HEIF.",
+        color="#16A34A"
     )
 
     uploaded_file = st.file_uploader(
@@ -605,14 +1643,14 @@ elif menu == "Imagem - Remover fundo":
                 st.image(
                     original_image,
                     caption="Imagem original",
-                    use_column_width=True
+                    use_container_width=True
                 )
 
-            if st.button("Remover fundo"):
+            if st.button("🪄 Remover fundo"):
                 try:
                     from rembg import remove
 
-                    with st.spinner("Removendo fundo... isso pode levar alguns segundos."):
+                    with st.spinner("Removendo fundo..."):
                         input_png = image_to_png_bytes(original_image)
                         output_bytes = remove(input_png)
                         result_image = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
@@ -626,7 +1664,7 @@ elif menu == "Imagem - Remover fundo":
                         st.image(
                             result_image,
                             caption="Resultado",
-                            use_column_width=True
+                            use_container_width=True
                         )
 
                     output = io.BytesIO()
@@ -642,10 +1680,10 @@ elif menu == "Imagem - Remover fundo":
 
                     output.seek(0)
 
-                    st.success("Fundo removido com sucesso!")
+                    st.success("Fundo removido com sucesso.")
 
                     st.download_button(
-                        label="Baixar resultado",
+                        label="⬇️ Baixar resultado",
                         data=output,
                         file_name=file_name,
                         mime=mime
@@ -658,13 +1696,17 @@ elif menu == "Imagem - Remover fundo":
             st.error(e)
 
 
-# =========================
+# ============================================================
 # Imagem - Converter imagem
-# =========================
+# ============================================================
 
-elif menu == "Imagem - Converter imagem":
-    st.title("🔁 Converter imagem")
-    st.caption("Converta imagens entre PNG, JPG e WEBP. HEIC/HEIF também são aceitos como entrada.")
+elif menu == "🔁 Imagem - Converter imagem":
+    render_section_title(
+        icon="repeat",
+        title="Converter imagem",
+        subtitle="Converta imagens entre PNG, JPG e WEBP.",
+        color="#F59E0B"
+    )
 
     uploaded_file = st.file_uploader(
         "Envie uma imagem",
@@ -690,10 +1732,10 @@ elif menu == "Imagem - Converter imagem":
             st.image(
                 image,
                 caption="Prévia",
-                use_column_width=True
+                use_container_width=True
             )
 
-            if st.button("Converter imagem"):
+            if st.button("🔁 Converter imagem"):
                 if output_format == "PNG":
                     data = image_to_png_bytes(image)
                     file_name = f"imagem_convertida_{now_suffix()}.png"
@@ -709,10 +1751,10 @@ elif menu == "Imagem - Converter imagem":
                     file_name = f"imagem_convertida_{now_suffix()}.webp"
                     mime = "image/webp"
 
-                st.success("Imagem convertida com sucesso!")
+                st.success("Imagem convertida com sucesso.")
 
                 st.download_button(
-                    label="Baixar imagem convertida",
+                    label="⬇️ Baixar imagem convertida",
                     data=make_download_buffer(data),
                     file_name=file_name,
                     mime=mime
@@ -722,13 +1764,17 @@ elif menu == "Imagem - Converter imagem":
             st.error(f"Erro ao converter imagem: {e}")
 
 
-# =========================
+# ============================================================
 # Imagem - Redimensionar e comprimir
-# =========================
+# ============================================================
 
-elif menu == "Imagem - Redimensionar e comprimir":
-    st.title("📐 Redimensionar e comprimir imagem")
-    st.caption("Altere largura, altura, qualidade e formato final da imagem.")
+elif menu == "📐 Imagem - Redimensionar e comprimir":
+    render_section_title(
+        icon="maximize",
+        title="Redimensionar e comprimir imagem",
+        subtitle="Altere largura, altura, qualidade e formato final.",
+        color="#0891B2"
+    )
 
     uploaded_file = st.file_uploader(
         "Envie uma imagem",
@@ -745,7 +1791,7 @@ elif menu == "Imagem - Redimensionar e comprimir":
             st.image(
                 image,
                 caption="Imagem original",
-                use_column_width=True
+                use_container_width=True
             )
 
             keep_ratio = st.checkbox("Manter proporção", value=True)
@@ -791,7 +1837,7 @@ elif menu == "Imagem - Redimensionar e comprimir":
                 value=85
             )
 
-            if st.button("Processar imagem"):
+            if st.button("📐 Processar imagem"):
                 resized = image.resize((int(new_width), int(new_height)))
 
                 if output_format == "PNG":
@@ -809,10 +1855,10 @@ elif menu == "Imagem - Redimensionar e comprimir":
                     file_name = f"imagem_redimensionada_{now_suffix()}.webp"
                     mime = "image/webp"
 
-                st.success("Imagem processada com sucesso!")
+                st.success("Imagem processada com sucesso.")
 
                 st.download_button(
-                    label="Baixar imagem",
+                    label="⬇️ Baixar imagem",
                     data=make_download_buffer(data),
                     file_name=file_name,
                     mime=mime
@@ -822,13 +1868,17 @@ elif menu == "Imagem - Redimensionar e comprimir":
             st.error(f"Erro ao processar imagem: {e}")
 
 
-# =========================
+# ============================================================
 # Imagem - Imagens para PDF
-# =========================
+# ============================================================
 
-elif menu == "Imagem - Imagens para PDF":
-    st.title("🖼️ Converter imagens em PDF")
-    st.caption("Envie uma ou mais imagens e gere um único PDF.")
+elif menu == "🖼️ Imagem - Imagens para PDF":
+    render_section_title(
+        icon="image",
+        title="Converter imagens em PDF",
+        subtitle="Envie uma ou mais imagens e gere um único PDF.",
+        color="#0891B2"
+    )
 
     uploaded_files = st.file_uploader(
         "Envie as imagens",
@@ -839,7 +1889,7 @@ elif menu == "Imagem - Imagens para PDF":
     if uploaded_files:
         st.write(f"{len(uploaded_files)} imagem(ns) selecionada(s).")
 
-        if st.button("Gerar PDF"):
+        if st.button("🖼️ Gerar PDF"):
             try:
                 images = []
 
@@ -874,10 +1924,10 @@ elif menu == "Imagem - Imagens para PDF":
 
                 output.seek(0)
 
-                st.success("PDF gerado com sucesso!")
+                st.success("PDF gerado com sucesso.")
 
                 st.download_button(
-                    label="Baixar PDF",
+                    label="⬇️ Baixar PDF",
                     data=output,
                     file_name=f"imagens_para_pdf_{now_suffix()}.pdf",
                     mime="application/pdf"
@@ -887,125 +1937,17 @@ elif menu == "Imagem - Imagens para PDF":
                 st.error(f"Erro ao gerar PDF: {e}")
 
 
-# =========================
-# Texto - Traduzir
-# =========================
-
-elif menu == "Texto - Traduzir":
-    st.title("🌐 Traduzir texto")
-    st.caption("Cole um texto ou extraia de PDF/DOCX e traduza para outro idioma.")
-
-    source_mode = st.radio(
-        "Origem do texto",
-        ["Digitar/colar texto", "Extrair de PDF", "Extrair de DOCX"]
-    )
-
-    text = ""
-
-    if source_mode == "Digitar/colar texto":
-        text = st.text_area("Texto para traduzir", height=250)
-
-    elif source_mode == "Extrair de PDF":
-        uploaded_file = st.file_uploader("Envie um PDF", type=["pdf"])
-
-        if uploaded_file and st.button("Extrair texto do PDF"):
-            try:
-                extracted = extract_text_from_pdf(uploaded_file)
-                st.session_state["texto_para_traduzir_pdf"] = extracted
-            except Exception as e:
-                st.error(f"Erro ao extrair texto: {e}")
-
-        text = st.session_state.get("texto_para_traduzir_pdf", "")
-
-        if text:
-            st.text_area("Texto extraído", text, height=250)
-
-    else:
-        uploaded_file = st.file_uploader("Envie um DOCX", type=["docx"])
-
-        if uploaded_file and st.button("Extrair texto do DOCX"):
-            try:
-                extracted = extract_text_from_docx(uploaded_file)
-                st.session_state["texto_para_traduzir_docx"] = extracted
-            except Exception as e:
-                st.error(f"Erro ao extrair texto: {e}")
-
-        text = st.session_state.get("texto_para_traduzir_docx", "")
-
-        if text:
-            st.text_area("Texto extraído", text, height=250)
-
-    languages = {
-        "Português": "pt",
-        "Inglês": "en",
-        "Espanhol": "es",
-        "Francês": "fr",
-        "Italiano": "it",
-        "Alemão": "de",
-        "Japonês": "ja",
-        "Coreano": "ko",
-        "Chinês simplificado": "zh-CN"
-    }
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        source_lang_label = st.selectbox(
-            "Idioma de origem",
-            ["auto"] + list(languages.keys())
-        )
-
-    with col2:
-        target_lang_label = st.selectbox(
-            "Idioma de destino",
-            list(languages.keys()),
-            index=0
-        )
-
-    if st.button("Traduzir"):
-        try:
-            if not text.strip():
-                st.warning("Insira ou extraia um texto antes de traduzir.")
-                st.stop()
-
-            source_lang = "auto" if source_lang_label == "auto" else languages[source_lang_label]
-            target_lang = languages[target_lang_label]
-
-            chunks = chunk_text(text)
-            translated_parts = []
-
-            with st.spinner("Traduzindo..."):
-                for chunk in chunks:
-                    translated = GoogleTranslator(
-                        source=source_lang,
-                        target=target_lang
-                    ).translate(chunk)
-
-                    translated_parts.append(translated)
-
-            final_text = "\n\n".join(translated_parts)
-
-            st.success("Tradução concluída!")
-            st.text_area("Texto traduzido", final_text, height=350)
-
-            st.download_button(
-                label="Baixar tradução em TXT",
-                data=make_download_buffer(final_text),
-                file_name=f"traducao_{now_suffix()}.txt",
-                mime="text/plain"
-            )
-
-        except Exception as e:
-            st.error(f"Erro ao traduzir texto: {e}")
-
-
-# =========================
+# ============================================================
 # Texto - Utilitários
-# =========================
+# ============================================================
 
-elif menu == "Texto - Utilitários":
-    st.title("🔤 Utilitários de texto")
-    st.caption("Conte palavras, limpe espaços e transforme texto rapidamente.")
+elif menu == "🔤 Texto - Utilitários":
+    render_section_title(
+        icon="file-text",
+        title="Utilitários de texto",
+        subtitle="Conte palavras, limpe espaços e transforme texto rapidamente.",
+        color="#2563EB"
+    )
 
     text = st.text_area("Digite ou cole seu texto", height=250)
 
@@ -1022,7 +1964,7 @@ elif menu == "Texto - Utilitários":
         ]
     )
 
-    if st.button("Aplicar"):
+    if st.button("🔤 Aplicar"):
         if not text.strip():
             st.warning("Insira um texto primeiro.")
             st.stop()
@@ -1075,28 +2017,33 @@ elif menu == "Texto - Utilitários":
                     if line.strip()
                 )
 
-            st.success("Texto processado!")
+            st.success("Texto processado.")
+
             st.text_area("Resultado", result, height=250)
 
             st.download_button(
-                label="Baixar TXT",
+                label="⬇️ Baixar TXT",
                 data=make_download_buffer(result),
                 file_name=f"texto_processado_{now_suffix()}.txt",
                 mime="text/plain"
             )
 
 
-# =========================
+# ============================================================
 # Áudio - Texto para MP3
-# =========================
+# ============================================================
 
-elif menu == "Áudio - Texto para MP3":
-    st.title("🔊 Texto para MP3")
-    st.caption("Converta texto em áudio MP3 usando gTTS.")
+elif menu == "🔊 Áudio - Texto para MP3":
+    render_section_title(
+        icon="volume",
+        title="Texto para MP3",
+        subtitle="Converta texto em áudio MP3 usando gTTS.",
+        color="#DC2626"
+    )
 
     text = st.text_area("Digite ou cole o texto", height=250)
 
-    languages = {
+    voice_languages = {
         "Português": "pt",
         "Inglês": "en",
         "Espanhol": "es",
@@ -1109,19 +2056,19 @@ elif menu == "Áudio - Texto para MP3":
 
     language_label = st.selectbox(
         "Idioma da voz",
-        list(languages.keys()),
+        list(voice_languages.keys()),
         index=0
     )
 
     slow = st.checkbox("Falar mais devagar", value=False)
 
-    if st.button("Gerar MP3"):
+    if st.button("🔊 Gerar MP3"):
         try:
             if not text.strip():
                 st.warning("Insira um texto primeiro.")
                 st.stop()
 
-            lang = languages[language_label]
+            lang = voice_languages[language_label]
 
             with st.spinner("Gerando áudio..."):
                 tts = gTTS(text=text, lang=lang, slow=slow)
@@ -1129,14 +2076,14 @@ elif menu == "Áudio - Texto para MP3":
                 tts.write_to_fp(output)
                 output.seek(0)
 
-            st.success("Áudio gerado com sucesso!")
+            st.success("Áudio gerado com sucesso.")
 
             st.audio(output, format="audio/mp3")
 
             output.seek(0)
 
             st.download_button(
-                label="Baixar MP3",
+                label="⬇️ Baixar MP3",
                 data=output,
                 file_name=f"audio_{now_suffix()}.mp3",
                 mime="audio/mpeg"
