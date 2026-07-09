@@ -7,3 +7,4 @@ gTTS==2.4.0
 fpdf2==2.7.0
 Pillow==10.4.0
 rembg==2.0.50
+pillow-heif==0.18.0
