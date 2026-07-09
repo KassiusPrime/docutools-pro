@@ -51,6 +51,7 @@ def validate_file_size(uploaded_file, max_mb=MAX_FILE_SIZE_MB):
         return False, "Nenhum arquivo enviado."
 
     size_mb = uploaded_file.size / (1024 * 1024)
+
     if size_mb > max_mb:
         return False, f"Arquivo muito grande. Tamanho máximo permitido: {max_mb} MB."
 
@@ -64,16 +65,19 @@ def get_file_bytes(uploaded_file):
 
 def make_download_buffer(data):
     buffer = io.BytesIO()
+
     if isinstance(data, bytes):
         buffer.write(data)
     else:
-        buffer.write(data.encode("utf-8"))
+        buffer.write(str(data).encode("utf-8"))
+
     buffer.seek(0)
     return buffer
 
 
 def open_image_from_upload(uploaded_file):
     valid, error = validate_file_size(uploaded_file)
+
     if not valid:
         raise ValueError(error)
 
@@ -87,8 +91,13 @@ def open_image_from_upload(uploaded_file):
         image = ImageOps.exif_transpose(image)
         image.load()
         return image
+
     except UnidentifiedImageError:
-        raise ValueError("Não foi possível identificar a imagem. Envie PNG, JPG, JPEG, WEBP, HEIC ou HEIF.")
+        raise ValueError(
+            "Não foi possível identificar a imagem. "
+            "Envie PNG, JPG, JPEG, WEBP, HEIC ou HEIF."
+        )
+
     except Exception as e:
         raise ValueError(f"Não foi possível abrir a imagem. Detalhes: {e}")
 
@@ -103,8 +112,9 @@ def image_to_png_bytes(image):
 
 def image_to_jpeg_bytes(image, quality=90):
     if image.mode in ("RGBA", "LA", "P"):
-        background = Image.new("RGB", image.size, "white")
-        background.paste(image.convert("RGBA"), mask=image.convert("RGBA").split()[-1])
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, "white")
+        background.paste(rgba, mask=rgba.split()[-1])
         image = background
     else:
         image = image.convert("RGB")
@@ -137,11 +147,13 @@ def apply_background(image, option, custom_color="#ffffff"):
 
     background = Image.new("RGBA", image.size, bg_color)
     background.paste(image, mask=image.split()[-1])
+
     return background.convert("RGB")
 
 
 def chunk_text(text, max_chars=4500):
     text = text.strip()
+
     if not text:
         return []
 
@@ -150,17 +162,26 @@ def chunk_text(text, max_chars=4500):
 
     for paragraph in text.splitlines():
         paragraph = paragraph.strip()
+
         if not paragraph:
             continue
 
-        if len(current) + len paragraph if False else 0:
-            pass
+        if len(paragraph) > max_chars:
+            if current:
+                chunks.append(current.strip())
+                current = ""
+
+            for i in range(0, len(paragraph), max_chars):
+                chunks.append(paragraph[i:i + max_chars])
+
+            continue
 
         if len(current) + len(paragraph) + 1 <= max_chars:
             current += paragraph + "\n"
         else:
             if current:
                 chunks.append(current.strip())
+
             current = paragraph + "\n"
 
     if current.strip():
@@ -171,6 +192,7 @@ def chunk_text(text, max_chars=4500):
 
 def extract_text_from_pdf(uploaded_file):
     valid, error = validate_file_size(uploaded_file)
+
     if not valid:
         raise ValueError(error)
 
@@ -188,6 +210,7 @@ def extract_text_from_pdf(uploaded_file):
 
 def extract_text_from_docx(uploaded_file):
     valid, error = validate_file_size(uploaded_file)
+
     if not valid:
         raise ValueError(error)
 
@@ -197,12 +220,14 @@ def extract_text_from_docx(uploaded_file):
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
 
     tables_text = []
+
     for table in doc.tables:
         for row in table.rows:
             cells = [cell.text.strip() for cell in row.cells]
             tables_text.append(" | ".join(cells))
 
     all_text = paragraphs + tables_text
+
     return "\n".join(all_text).strip()
 
 
@@ -223,47 +248,7 @@ def text_stats(text):
 
 
 # =========================
-# Correção para função chunk_text
-# =========================
-
-def chunk_text(text, max_chars=4500):
-    text = text.strip()
-    if not text:
-        return []
-
-    chunks = []
-    current = ""
-
-    for paragraph in text.splitlines():
-        paragraph = paragraph.strip()
-
-        if not paragraph:
-            continue
-
-        if len(paragraph) > max_chars:
-            if current:
-                chunks.append(current.strip())
-                current = ""
-
-            for i in range(0, len(paragraph), max_chars):
-                chunks.append(paragraph[i:i + max_chars])
-            continue
-
-        if len(current) + len(paragraph) + 1 <= max_chars:
-            current += paragraph + "\n"
-        else:
-            if current:
-                chunks.append(current.strip())
-            current = paragraph + "\n"
-
-    if current.strip():
-        chunks.append(current.strip())
-
-    return chunks
-
-
-# =========================
-# Interface base
+# Sidebar
 # =========================
 
 st.sidebar.title("🧰 DocuTools Pro")
@@ -288,11 +273,14 @@ menu = st.sidebar.radio(
 )
 
 st.sidebar.divider()
-st.sidebar.info("Dica: para remover fundo com HEIC/HEIF, mantenha o arquivo `packages.txt` no projeto.")
+st.sidebar.info(
+    "Para melhor compatibilidade com HEIC/HEIF, mantenha o arquivo "
+    "`packages.txt` no projeto."
+)
 
 
 # =========================
-# Página inicial
+# Início
 # =========================
 
 if menu == "Início":
@@ -301,7 +289,7 @@ if menu == "Início":
 
     st.write(
         "Escolha uma ferramenta na barra lateral para começar. "
-        "O app processa arquivos PDF, DOCX, imagens, textos e áudio diretamente pela interface."
+        "Você pode processar PDFs, DOCX, imagens, textos e áudio diretamente pelo navegador."
     )
 
     col1, col2, col3 = st.columns(3)
@@ -369,6 +357,7 @@ elif menu == "PDF - Juntar PDFs":
 
                 for uploaded_file in uploaded_files:
                     valid, error = validate_file_size(uploaded_file)
+
                     if not valid:
                         st.error(f"{uploaded_file.name}: {error}")
                         st.stop()
@@ -402,7 +391,7 @@ elif menu == "PDF - Juntar PDFs":
 
 elif menu == "PDF - Dividir PDF":
     st.title("✂️ Dividir PDF")
-    st.caption("Extraia uma página, um intervalo ou separe todas as páginas em arquivos individuais.")
+    st.caption("Extraia um intervalo ou separe todas as páginas em arquivos individuais.")
 
     uploaded_file = st.file_uploader(
         "Envie um PDF",
@@ -411,6 +400,12 @@ elif menu == "PDF - Dividir PDF":
 
     if uploaded_file:
         try:
+            valid, error = validate_file_size(uploaded_file)
+
+            if not valid:
+                st.error(error)
+                st.stop()
+
             file_bytes = get_file_bytes(uploaded_file)
             reader = PdfReader(io.BytesIO(file_bytes))
             total_pages = len(reader.pages)
@@ -515,7 +510,10 @@ elif menu == "PDF - Extrair texto":
                 text = extract_text_from_pdf(uploaded_file)
 
                 if not text:
-                    st.warning("Nenhum texto foi encontrado. Este PDF pode ser composto por imagens digitalizadas.")
+                    st.warning(
+                        "Nenhum texto foi encontrado. "
+                        "Este PDF pode ser uma digitalização em imagem."
+                    )
                 else:
                     st.success("Texto extraído com sucesso!")
                     st.text_area("Texto extraído", text, height=400)
@@ -572,7 +570,10 @@ elif menu == "Word - Extrair texto DOCX":
 
 elif menu == "Imagem - Remover fundo":
     st.title("🖼️ Remover fundo de imagem")
-    st.caption("Envie PNG, JPG, JPEG, WEBP, HEIC ou HEIF. A saída será PNG com transparência ou fundo personalizado.")
+    st.caption(
+        "Envie PNG, JPG, JPEG, WEBP, HEIC ou HEIF. "
+        "A saída pode ser PNG transparente ou JPG com fundo personalizado."
+    )
 
     uploaded_file = st.file_uploader(
         "Envie uma imagem",
@@ -601,7 +602,11 @@ elif menu == "Imagem - Remover fundo":
             col1, col2 = st.columns(2)
 
             with col1:
-                st.image(original_image, caption="Imagem original", use_container_width=True)
+                st.image(
+                    original_image,
+                    caption="Imagem original",
+                    use_column_width=True
+                )
 
             if st.button("Remover fundo"):
                 try:
@@ -611,10 +616,18 @@ elif menu == "Imagem - Remover fundo":
                         input_png = image_to_png_bytes(original_image)
                         output_bytes = remove(input_png)
                         result_image = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
-                        result_image = apply_background(result_image, background_option, custom_color)
+                        result_image = apply_background(
+                            result_image,
+                            background_option,
+                            custom_color
+                        )
 
                     with col2:
-                        st.image(result_image, caption="Resultado", use_container_width=True)
+                        st.image(
+                            result_image,
+                            caption="Resultado",
+                            use_column_width=True
+                        )
 
                     output = io.BytesIO()
 
@@ -673,7 +686,12 @@ elif menu == "Imagem - Converter imagem":
     if uploaded_file:
         try:
             image = open_image_from_upload(uploaded_file)
-            st.image(image, caption="Prévia", use_container_width=True)
+
+            st.image(
+                image,
+                caption="Prévia",
+                use_column_width=True
+            )
 
             if st.button("Converter imagem"):
                 if output_format == "PNG":
@@ -723,7 +741,12 @@ elif menu == "Imagem - Redimensionar e comprimir":
             original_width, original_height = image.size
 
             st.info(f"Tamanho original: {original_width} x {original_height}px")
-            st.image(image, caption="Imagem original", use_container_width=True)
+
+            st.image(
+                image,
+                caption="Imagem original",
+                use_column_width=True
+            )
 
             keep_ratio = st.checkbox("Manter proporção", value=True)
 
@@ -740,6 +763,7 @@ elif menu == "Imagem - Redimensionar e comprimir":
             with col2:
                 if keep_ratio:
                     new_height = int((new_width / original_width) * original_height)
+
                     st.number_input(
                         "Nova altura",
                         min_value=1,
@@ -823,8 +847,9 @@ elif menu == "Imagem - Imagens para PDF":
                     image = open_image_from_upload(uploaded_file)
 
                     if image.mode in ("RGBA", "LA", "P"):
-                        bg = Image.new("RGB", image.size, "white")
-                        bg.paste(image.convert("RGBA"), mask=image.convert("RGBA").split()[-1])
+                        rgba = image.convert("RGBA")
+                        bg = Image.new("RGB", rgba.size, "white")
+                        bg.paste(rgba, mask=rgba.split()[-1])
                         image = bg
                     else:
                         image = image.convert("RGB")
@@ -882,27 +907,31 @@ elif menu == "Texto - Traduzir":
 
     elif source_mode == "Extrair de PDF":
         uploaded_file = st.file_uploader("Envie um PDF", type=["pdf"])
+
         if uploaded_file and st.button("Extrair texto do PDF"):
             try:
-                text = extract_text_from_pdf(uploaded_file)
-                st.session_state["texto_para_traduzir"] = text
+                extracted = extract_text_from_pdf(uploaded_file)
+                st.session_state["texto_para_traduzir_pdf"] = extracted
             except Exception as e:
                 st.error(f"Erro ao extrair texto: {e}")
 
-        text = st.session_state.get("texto_para_traduzir", "")
+        text = st.session_state.get("texto_para_traduzir_pdf", "")
+
         if text:
             st.text_area("Texto extraído", text, height=250)
 
     else:
         uploaded_file = st.file_uploader("Envie um DOCX", type=["docx"])
+
         if uploaded_file and st.button("Extrair texto do DOCX"):
             try:
-                text = extract_text_from_docx(uploaded_file)
-                st.session_state["texto_para_traduzir"] = text
+                extracted = extract_text_from_docx(uploaded_file)
+                st.session_state["texto_para_traduzir_docx"] = extracted
             except Exception as e:
                 st.error(f"Erro ao extrair texto: {e}")
 
-        text = st.session_state.get("texto_para_traduzir", "")
+        text = st.session_state.get("texto_para_traduzir_docx", "")
+
         if text:
             st.text_area("Texto extraído", text, height=250)
 
@@ -1024,17 +1053,27 @@ elif menu == "Texto - Utilitários":
                 result = text.lower()
 
             elif action == "Capitalizar frases":
-                result = ". ".join(sentence.strip().capitalize() for sentence in text.split(". "))
+                result = ". ".join(
+                    sentence.strip().capitalize()
+                    for sentence in text.split(". ")
+                )
 
             elif action == "Remover espaços extras":
                 result = re.sub(r"[ \t]+", " ", text)
                 result = re.sub(r" *\n *", "\n", result)
 
             elif action == "Remover linhas vazias":
-                result = "\n".join(line for line in text.splitlines() if line.strip())
+                result = "\n".join(
+                    line for line in text.splitlines()
+                    if line.strip()
+                )
 
             elif action == "Limpar quebras de linha":
-                result = " ".join(line.strip() for line in text.splitlines() if line.strip())
+                result = " ".join(
+                    line.strip()
+                    for line in text.splitlines()
+                    if line.strip()
+                )
 
             st.success("Texto processado!")
             st.text_area("Resultado", result, height=250)
