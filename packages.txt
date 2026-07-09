@@ -1,2 +1,9 @@
 libheif1
 libheif-dev
+tesseract-ocr
+tesseract-ocr-por
+tesseract-ocr-eng
+tesseract-ocr-spa
+tesseract-ocr-fra
+tesseract-ocr-deu
+poppler-utils
