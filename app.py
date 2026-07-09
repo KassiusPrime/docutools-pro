@@ -1,733 +1,1107 @@
-import streamlit as st
-from pypdf import PdfReader
-from docx import Document
-from bs4 import BeautifulSoup
-from deep_translator import GoogleTranslator
-from gtts import gTTS
-from fpdf import FPDF
-from PIL import Image
 import io
-import os
-import time
+import re
+import zipfile
 from datetime import datetime
 
-# Tentar importar rembg (removedor de fundo)
-try:
-    from rembg import remove as remove_background
-    HAS_REMBG = True
-except ImportError:
-    HAS_REMBG = False
+import streamlit as st
+from PIL import Image, ImageOps, UnidentifiedImageError
 
-# ============================================================
-# CONFIGURAÇÃO DE PÁGINA
-# ============================================================
+from pypdf import PdfReader, PdfWriter
+from docx import Document
+from deep_translator import GoogleTranslator
+from gtts import gTTS
+
+
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except Exception:
+    pass
+
 
 st.set_page_config(
     page_title="DocuTools Pro",
-    page_icon="📄",
+    page_icon="🧰",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Limite rígido de upload (em KB). Mantenha isso alinhado com
-# [server] maxUploadSize em .streamlit/config.toml (veja instruções).
-LIMITE_UPLOAD_KB = 50 * 1024  # 50 MB
 
-st.title("📄 DocuTools Pro")
-st.subheader("Processador de Documentos, OCR, Tradutor, Áudio e Conversor de Formatos")
-st.write("---")
+APP_NAME = "DocuTools Pro"
+MAX_FILE_SIZE_MB = 50
 
-# ============================================================
-# INICIALIZAÇÃO DE ESTADO
-# ============================================================
 
-if 'texto_extraido' not in st.session_state:
-    st.session_state.texto_extraido = ""
+# =========================
+# Funções auxiliares
+# =========================
 
-if 'texto_resultado' not in st.session_state:
-    st.session_state.texto_resultado = ""
+def now_suffix():
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
-if 'idioma_destino' not in st.session_state:
-    st.session_state.idioma_destino = "en"
 
-# ============================================================
-# FONTE COM FALLBACK (para conversão em imagem)
-# ============================================================
+def sanitize_filename(name):
+    name = name or "arquivo"
+    name = re.sub(r"[^\w\-. ]+", "", name, flags=re.UNICODE)
+    name = name.strip().replace(" ", "_")
+    return name or "arquivo"
 
-def obter_fonte(tamanho=20):
-    """
-    Tenta carregar uma fonte TrueType legível em ordem de preferência.
-    Em servidores Linux (Streamlit Cloud, Docker) 'arial.ttf' quase nunca
-    existe, então tentamos alternativas comuns antes de cair no fallback
-    feio do Pillow (load_default).
-    """
-    from PIL import ImageFont
 
-    candidatos = [
-        "arial.ttf",
-        "Arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",  # macOS
-        "C:\\Windows\\Fonts\\arial.ttf",                  # Windows
-    ]
+def validate_file_size(uploaded_file, max_mb=MAX_FILE_SIZE_MB):
+    if uploaded_file is None:
+        return False, "Nenhum arquivo enviado."
 
-    for caminho in candidatos:
-        try:
-            return ImageFont.truetype(caminho, tamanho)
-        except Exception:
+    size_mb = uploaded_file.size / (1024 * 1024)
+    if size_mb > max_mb:
+        return False, f"Arquivo muito grande. Tamanho máximo permitido: {max_mb} MB."
+
+    return True, None
+
+
+def get_file_bytes(uploaded_file):
+    uploaded_file.seek(0)
+    return uploaded_file.read()
+
+
+def make_download_buffer(data):
+    buffer = io.BytesIO()
+    if isinstance(data, bytes):
+        buffer.write(data)
+    else:
+        buffer.write(data.encode("utf-8"))
+    buffer.seek(0)
+    return buffer
+
+
+def open_image_from_upload(uploaded_file):
+    valid, error = validate_file_size(uploaded_file)
+    if not valid:
+        raise ValueError(error)
+
+    file_bytes = get_file_bytes(uploaded_file)
+
+    if not file_bytes:
+        raise ValueError("O arquivo enviado está vazio.")
+
+    try:
+        image = Image.open(io.BytesIO(file_bytes))
+        image = ImageOps.exif_transpose(image)
+        image.load()
+        return image
+    except UnidentifiedImageError:
+        raise ValueError("Não foi possível identificar a imagem. Envie PNG, JPG, JPEG, WEBP, HEIC ou HEIF.")
+    except Exception as e:
+        raise ValueError(f"Não foi possível abrir a imagem. Detalhes: {e}")
+
+
+def image_to_png_bytes(image):
+    image = image.convert("RGBA")
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
+    return output.getvalue()
+
+
+def image_to_jpeg_bytes(image, quality=90):
+    if image.mode in ("RGBA", "LA", "P"):
+        background = Image.new("RGB", image.size, "white")
+        background.paste(image.convert("RGBA"), mask=image.convert("RGBA").split()[-1])
+        image = background
+    else:
+        image = image.convert("RGB")
+
+    output = io.BytesIO()
+    image.save(output, format="JPEG", quality=quality, optimize=True)
+    output.seek(0)
+    return output.getvalue()
+
+
+def image_to_webp_bytes(image, quality=90):
+    output = io.BytesIO()
+    image.save(output, format="WEBP", quality=quality, method=6)
+    output.seek(0)
+    return output.getvalue()
+
+
+def apply_background(image, option, custom_color="#ffffff"):
+    image = image.convert("RGBA")
+
+    if option == "Transparente":
+        return image
+
+    if option == "Branco":
+        bg_color = "#ffffff"
+    elif option == "Preto":
+        bg_color = "#000000"
+    else:
+        bg_color = custom_color
+
+    background = Image.new("RGBA", image.size, bg_color)
+    background.paste(image, mask=image.split()[-1])
+    return background.convert("RGB")
+
+
+def chunk_text(text, max_chars=4500):
+    text = text.strip()
+    if not text:
+        return []
+
+    chunks = []
+    current = ""
+
+    for paragraph in text.splitlines():
+        paragraph = paragraph.strip()
+        if not paragraph:
             continue
 
-    # Fallback final: fonte padrão do Pillow (permite tamanho a partir do Pillow 9.2+)
-    try:
-        return ImageFont.load_default(size=tamanho)
-    except TypeError:
-        return ImageFont.load_default()
+        if len(current) + len paragraph if False else 0:
+            pass
 
-# ============================================================
-# FUNÇÕES DE EXTRAÇÃO (com cache)
-# ============================================================
-# Observação: passamos bytes (via getvalue()) em vez do objeto UploadedFile
-# diretamente, porque o cache do Streamlit precisa de um argumento hasheável
-# de forma estável entre reruns.
+        if len(current) + len(paragraph) + 1 <= max_chars:
+            current += paragraph + "\n"
+        else:
+            if current:
+                chunks.append(current.strip())
+            current = paragraph + "\n"
 
-@st.cache_data(show_spinner=False)
-def extrair_txt(file_bytes: bytes) -> str:
-    """Extrai texto de arquivo TXT"""
-    try:
-        return file_bytes.decode("utf-8", errors="ignore")
-    except Exception as e:
-        st.error(f"Erro ao extrair TXT: {e}")
-        return ""
+    if current.strip():
+        chunks.append(current.strip())
 
-@st.cache_data(show_spinner=False)
-def extrair_pdf(file_bytes: bytes) -> str:
-    """Extrai texto de arquivo PDF"""
-    try:
-        pdf = PdfReader(io.BytesIO(file_bytes))
-        texto = ""
-        for page in pdf.pages:
-            texto += (page.extract_text() or "") + "\n"
-        return texto
-    except Exception as e:
-        st.error(f"Erro ao extrair PDF: {e}")
-        return ""
+    return chunks
 
-@st.cache_data(show_spinner=False)
-def extrair_docx(file_bytes: bytes) -> str:
-    """Extrai texto de arquivo DOCX"""
-    try:
-        doc = Document(io.BytesIO(file_bytes))
-        texto = "\n".join([para.text for para in doc.paragraphs])
-        return texto
-    except Exception as e:
-        st.error(f"Erro ao extrair DOCX: {e}")
-        return ""
 
-@st.cache_data(show_spinner=False)
-def extrair_html(file_bytes: bytes) -> str:
-    """Extrai texto de arquivo HTML"""
-    try:
-        soup = BeautifulSoup(file_bytes, "html.parser")
-        return soup.get_text(separator="\n")
-    except Exception as e:
-        st.error(f"Erro ao extrair HTML: {e}")
-        return ""
+def extract_text_from_pdf(uploaded_file):
+    valid, error = validate_file_size(uploaded_file)
+    if not valid:
+        raise ValueError(error)
 
-# ============================================================
-# FUNÇÕES DE PROCESSAMENTO
-# ============================================================
+    file_bytes = get_file_bytes(uploaded_file)
+    reader = PdfReader(io.BytesIO(file_bytes))
 
-def dividir_em_blocos(texto, tamanho_maximo=3500):
-    """Divide texto em blocos seguros para tradução"""
-    blocos = []
-    inicio = 0
+    pages_text = []
 
-    while inicio < len(texto):
-        fim = inicio + tamanho_maximo
+    for index, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        pages_text.append(f"\n\n--- Página {index} ---\n{text}")
 
-        if fim < len(texto):
-            ultimo_espaco = texto.rfind(' ', inicio, fim)
-            if ultimo_espaco > inicio:
-                fim = ultimo_espaco
+    return "\n".join(pages_text).strip()
 
-        bloco = texto[inicio:fim].strip()
-        if bloco:
-            blocos.append(bloco)
-        inicio = fim
 
-    return blocos
+def extract_text_from_docx(uploaded_file):
+    valid, error = validate_file_size(uploaded_file)
+    if not valid:
+        raise ValueError(error)
 
-def traduzir_bloco_com_retry(tradutor, bloco, max_tentativas=3):
-    """
-    Traduz um único bloco com retry e backoff exponencial.
-    Protege contra erros 429 (rate limit) do endpoint não-oficial
-    do Google Translate usado pelo deep-translator.
-    """
-    ultimo_erro = None
-    for tentativa in range(max_tentativas):
-        try:
-            return tradutor.translate(bloco)
-        except Exception as e:
-            ultimo_erro = e
-            if tentativa < max_tentativas - 1:
-                time.sleep(2 ** tentativa)  # 1s, 2s, 4s...
-    raise ultimo_erro
+    file_bytes = get_file_bytes(uploaded_file)
+    doc = Document(io.BytesIO(file_bytes))
 
-def traduzir_com_chunking(texto, idioma_destino):
-    """Traduz texto grande em blocos, com retry por bloco"""
-    if not texto.strip():
-        st.warning("Texto vazio para tradução")
-        return ""
+    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
 
-    try:
-        tradutor = GoogleTranslator(source='auto', target=idioma_destino)
-        blocos = dividir_em_blocos(texto, tamanho_maximo=3500)
+    tables_text = []
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            tables_text.append(" | ".join(cells))
 
-        texto_traduzido_completo = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+    all_text = paragraphs + tables_text
+    return "\n".join(all_text).strip()
 
-        for index, bloco in enumerate(blocos):
+
+def text_stats(text):
+    chars = len(text)
+    chars_no_spaces = len(text.replace(" ", ""))
+    words = len(re.findall(r"\b\w+\b", text, flags=re.UNICODE))
+    lines = len(text.splitlines())
+    paragraphs = len([p for p in text.split("\n\n") if p.strip()])
+
+    return {
+        "Caracteres": chars,
+        "Caracteres sem espaços": chars_no_spaces,
+        "Palavras": words,
+        "Linhas": lines,
+        "Parágrafos": paragraphs
+    }
+
+
+# =========================
+# Correção para função chunk_text
+# =========================
+
+def chunk_text(text, max_chars=4500):
+    text = text.strip()
+    if not text:
+        return []
+
+    chunks = []
+    current = ""
+
+    for paragraph in text.splitlines():
+        paragraph = paragraph.strip()
+
+        if not paragraph:
+            continue
+
+        if len(paragraph) > max_chars:
+            if current:
+                chunks.append(current.strip())
+                current = ""
+
+            for i in range(0, len(paragraph), max_chars):
+                chunks.append(paragraph[i:i + max_chars])
+            continue
+
+        if len(current) + len(paragraph) + 1 <= max_chars:
+            current += paragraph + "\n"
+        else:
+            if current:
+                chunks.append(current.strip())
+            current = paragraph + "\n"
+
+    if current.strip():
+        chunks.append(current.strip())
+
+    return chunks
+
+
+# =========================
+# Interface base
+# =========================
+
+st.sidebar.title("🧰 DocuTools Pro")
+st.sidebar.caption("Ferramentas para PDF, Word, imagens, texto e áudio.")
+
+menu = st.sidebar.radio(
+    "Escolha uma ferramenta",
+    [
+        "Início",
+        "PDF - Juntar PDFs",
+        "PDF - Dividir PDF",
+        "PDF - Extrair texto",
+        "Word - Extrair texto DOCX",
+        "Imagem - Remover fundo",
+        "Imagem - Converter imagem",
+        "Imagem - Redimensionar e comprimir",
+        "Imagem - Imagens para PDF",
+        "Texto - Traduzir",
+        "Texto - Utilitários",
+        "Áudio - Texto para MP3"
+    ]
+)
+
+st.sidebar.divider()
+st.sidebar.info("Dica: para remover fundo com HEIC/HEIF, mantenha o arquivo `packages.txt` no projeto.")
+
+
+# =========================
+# Página inicial
+# =========================
+
+if menu == "Início":
+    st.title("🧰 DocuTools Pro")
+    st.subheader("Ferramentas rápidas para documentos, imagens, texto e áudio.")
+
+    st.write(
+        "Escolha uma ferramenta na barra lateral para começar. "
+        "O app processa arquivos PDF, DOCX, imagens, textos e áudio diretamente pela interface."
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.info("📄 **PDF**\n\nJuntar, dividir e extrair texto de PDFs.")
+
+    with col2:
+        st.success("🖼️ **Imagens**\n\nRemover fundo, converter, redimensionar e gerar PDF.")
+
+    with col3:
+        st.warning("🔤 **Texto e Áudio**\n\nTraduzir, limpar texto, contar palavras e gerar MP3.")
+
+    st.divider()
+
+    st.markdown(
+        """
+        ### Formatos suportados
+
+        **PDF**
+        - `.pdf`
+
+        **Word**
+        - `.docx`
+
+        **Imagens**
+        - `.png`
+        - `.jpg`
+        - `.jpeg`
+        - `.webp`
+        - `.heic`
+        - `.heif`
+
+        **Saídas**
+        - PDF
+        - TXT
+        - PNG
+        - JPG
+        - WEBP
+        - MP3
+        """
+    )
+
+
+# =========================
+# PDF - Juntar PDFs
+# =========================
+
+elif menu == "PDF - Juntar PDFs":
+    st.title("📄 Juntar PDFs")
+    st.caption("Envie dois ou mais arquivos PDF para gerar um único PDF.")
+
+    uploaded_files = st.file_uploader(
+        "Envie os PDFs",
+        type=["pdf"],
+        accept_multiple_files=True
+    )
+
+    if uploaded_files:
+        st.write(f"{len(uploaded_files)} arquivo(s) selecionado(s).")
+
+        if st.button("Juntar PDFs"):
             try:
-                progresso = (index + 1) / len(blocos)
-                progress_bar.progress(progresso)
-                status_text.info(f"📦 Traduzindo bloco {index + 1} de {len(blocos)}...")
+                writer = PdfWriter()
 
-                bloco_traduzido = traduzir_bloco_com_retry(tradutor, bloco)
-                texto_traduzido_completo.append(bloco_traduzido)
+                for uploaded_file in uploaded_files:
+                    valid, error = validate_file_size(uploaded_file)
+                    if not valid:
+                        st.error(f"{uploaded_file.name}: {error}")
+                        st.stop()
 
-                # Pequena pausa entre blocos para reduzir chance de rate limit
-                time.sleep(0.5)
+                    file_bytes = get_file_bytes(uploaded_file)
+                    reader = PdfReader(io.BytesIO(file_bytes))
+
+                    for page in reader.pages:
+                        writer.add_page(page)
+
+                output = io.BytesIO()
+                writer.write(output)
+                output.seek(0)
+
+                st.success("PDFs unidos com sucesso!")
+
+                st.download_button(
+                    label="Baixar PDF unido",
+                    data=output,
+                    file_name=f"pdf_unido_{now_suffix()}.pdf",
+                    mime="application/pdf"
+                )
 
             except Exception as e:
-                st.error(f"Erro no bloco {index + 1} (após tentativas): {str(e)}")
-                continue
+                st.error(f"Erro ao juntar PDFs: {e}")
 
-        progress_bar.empty()
-        status_text.empty()
 
-        return "\n".join(texto_traduzido_completo)
+# =========================
+# PDF - Dividir PDF
+# =========================
 
-    except Exception as e:
-        st.error(f"Erro na tradução: {e}")
-        return ""
+elif menu == "PDF - Dividir PDF":
+    st.title("✂️ Dividir PDF")
+    st.caption("Extraia uma página, um intervalo ou separe todas as páginas em arquivos individuais.")
 
-def gerar_audio(texto, lang_audio='pt'):
-    """Gera áudio a partir do texto"""
-    if not texto.strip():
-        st.warning("Texto vazio para áudio")
-        return None
+    uploaded_file = st.file_uploader(
+        "Envie um PDF",
+        type=["pdf"]
+    )
 
-    try:
-        arquivo_saida = io.BytesIO()
-        texto_limitado = texto[:5000]
+    if uploaded_file:
+        try:
+            file_bytes = get_file_bytes(uploaded_file)
+            reader = PdfReader(io.BytesIO(file_bytes))
+            total_pages = len(reader.pages)
 
-        with st.spinner("🎵 Gerando arquivo de áudio..."):
-            tts = gTTS(text=texto_limitado, lang=lang_audio, slow=False)
-            tts.write_to_fp(arquivo_saida)
+            st.info(f"O PDF possui {total_pages} página(s).")
 
-        arquivo_saida.seek(0)
-        return arquivo_saida
+            mode = st.radio(
+                "Modo de divisão",
+                [
+                    "Extrair intervalo de páginas",
+                    "Separar todas as páginas"
+                ]
+            )
 
-    except Exception as e:
-        st.error(f"Erro ao gerar áudio: {e}")
-        return None
+            if mode == "Extrair intervalo de páginas":
+                col1, col2 = st.columns(2)
 
-# ============================================================
-# FUNÇÕES DE CONVERSÃO
-# ============================================================
+                with col1:
+                    start_page = st.number_input(
+                        "Página inicial",
+                        min_value=1,
+                        max_value=total_pages,
+                        value=1
+                    )
 
-def converter_para_pdf(texto):
-    """Converte texto para PDF"""
-    try:
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.set_font("Helvetica", size=11)
+                with col2:
+                    end_page = st.number_input(
+                        "Página final",
+                        min_value=start_page,
+                        max_value=total_pages,
+                        value=total_pages
+                    )
 
-        for linha in texto.split('\n'):
-            linha_sanitizada = linha.encode('latin-1', 'replace').decode('latin-1')
-            if linha_sanitizada.strip():
-                pdf.multi_cell(0, 10, text=linha_sanitizada)
+                if st.button("Extrair páginas"):
+                    writer = PdfWriter()
+
+                    for page_index in range(start_page - 1, end_page):
+                        writer.add_page(reader.pages[page_index])
+
+                    output = io.BytesIO()
+                    writer.write(output)
+                    output.seek(0)
+
+                    st.success("Páginas extraídas com sucesso!")
+
+                    st.download_button(
+                        label="Baixar PDF extraído",
+                        data=output,
+                        file_name=f"paginas_{start_page}_a_{end_page}_{now_suffix()}.pdf",
+                        mime="application/pdf"
+                    )
+
             else:
-                pdf.ln(5)
+                if st.button("Separar todas as páginas"):
+                    zip_buffer = io.BytesIO()
 
-        return pdf.output()
-    except Exception as e:
-        st.error(f"Erro ao converter PDF: {e}")
-        return None
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                        for index, page in enumerate(reader.pages, start=1):
+                            writer = PdfWriter()
+                            writer.add_page(page)
 
-def converter_para_docx(texto):
-    """Converte texto para DOCX"""
-    try:
-        doc = Document()
-        doc.add_paragraph(texto)
-        docx_bytes = io.BytesIO()
-        doc.save(docx_bytes)
-        return docx_bytes.getvalue()
-    except Exception as e:
-        st.error(f"Erro ao converter DOCX: {e}")
-        return None
+                            pdf_buffer = io.BytesIO()
+                            writer.write(pdf_buffer)
+                            pdf_buffer.seek(0)
 
-def converter_para_html(texto):
-    """Converte texto para HTML"""
-    try:
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <title>DocuTools Pro Export</title>
-            <style>
-                body {{
-                    font-family: Arial, sans-serif;
-                    margin: 20px;
-                    line-height: 1.6;
-                    background-color: #f5f5f5;
-                }}
-                .container {{
-                    background-color: white;
-                    padding: 20px;
-                    border-radius: 8px;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                }}
-                pre {{
-                    background-color: #f0f0f0;
-                    padding: 15px;
-                    border-radius: 5px;
-                    overflow-x: auto;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>📄 DocuTools Pro - Documento Exportado</h1>
-                <p>Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</p>
-                <pre>{texto}</pre>
-            </div>
-        </body>
-        </html>
-        """
-        return html_content.encode('utf-8')
-    except Exception as e:
-        st.error(f"Erro ao converter HTML: {e}")
-        return None
+                            zip_file.writestr(
+                                f"pagina_{index}.pdf",
+                                pdf_buffer.getvalue()
+                            )
 
-def converter_para_imagem(texto, formato='png'):
-    """Converte texto para imagem (PNG ou JPG)"""
-    try:
-        from PIL import ImageDraw
+                    zip_buffer.seek(0)
 
-        width = 1200
-        height = max(800, len(texto.split('\n')) * 30)
-        img = Image.new('RGB', (width, height), color='white')
-        draw = ImageDraw.Draw(img)
+                    st.success("Páginas separadas com sucesso!")
 
-        font = obter_fonte(20)
+                    st.download_button(
+                        label="Baixar ZIP com páginas separadas",
+                        data=zip_buffer,
+                        file_name=f"paginas_separadas_{now_suffix()}.zip",
+                        mime="application/zip"
+                    )
 
-        y = 20
-        margin = 20
+        except Exception as e:
+            st.error(f"Erro ao dividir PDF: {e}")
 
-        for linha in texto.split('\n'):
-            while len(linha) > 0:
-                draw.text((margin, y), linha[:80], fill='black', font=font)
-                linha = linha[80:]
-                y += 30
-                if y > height - 50:
-                    break
-            if y > height - 50:
-                break
 
-        img_bytes = io.BytesIO()
-        if formato.lower() in ['jpg', 'jpeg']:
-            img = img.convert('RGB')
-            img.save(img_bytes, format='JPEG', quality=95)
-        else:
-            img.save(img_bytes, format='PNG')
+# =========================
+# PDF - Extrair texto
+# =========================
 
-        return img_bytes.getvalue()
-    except Exception as e:
-        st.error(f"Erro ao converter imagem: {e}")
-        return None
+elif menu == "PDF - Extrair texto":
+    st.title("📄 Extrair texto de PDF")
+    st.caption("Extraia texto das páginas de um arquivo PDF.")
 
-def remover_fundo_imagem(arquivo_imagem):
-    """Remove fundo da imagem usando rembg"""
-    if not HAS_REMBG:
-        st.error("❌ A biblioteca 'rembg' não está instalada. Verifique o requirements.txt")
-        return None
+    uploaded_file = st.file_uploader(
+        "Envie um PDF",
+        type=["pdf"]
+    )
 
-    try:
-        img_bytes = arquivo_imagem.read()
+    if uploaded_file:
+        if st.button("Extrair texto"):
+            try:
+                text = extract_text_from_pdf(uploaded_file)
 
-        with st.status("🎨 Removendo fundo...", expanded=True) as status:
-            st.write("Carregando modelo de IA (pode demorar na primeira execução)...")
-            resultado = remove_background(img_bytes)
-            status.update(label="✅ Fundo removido!", state="complete", expanded=False)
+                if not text:
+                    st.warning("Nenhum texto foi encontrado. Este PDF pode ser composto por imagens digitalizadas.")
+                else:
+                    st.success("Texto extraído com sucesso!")
+                    st.text_area("Texto extraído", text, height=400)
 
-        return resultado
-    except Exception as e:
-        st.error(f"Erro ao remover fundo: {e}")
-        return None
+                    st.download_button(
+                        label="Baixar TXT",
+                        data=make_download_buffer(text),
+                        file_name=f"texto_pdf_{now_suffix()}.txt",
+                        mime="text/plain"
+                    )
 
-# ============================================================
-# SIDEBAR: RESETAR ESTADO
-# ============================================================
+            except Exception as e:
+                st.error(f"Erro ao extrair texto do PDF: {e}")
 
-with st.sidebar:
-    st.header("⚙️ Opções")
-    if st.button("🗑️ Resetar tudo", use_container_width=True, key="btn_reset_geral"):
-        for chave in ["texto_extraido", "texto_resultado", "idioma_destino"]:
-            st.session_state.pop(chave, None)
-        st.rerun()
 
-# ============================================================
-# LAYOUT PRINCIPAL
-# ============================================================
+# =========================
+# Word - Extrair texto DOCX
+# =========================
 
-col1, col2 = st.columns([1, 1], gap="large")
+elif menu == "Word - Extrair texto DOCX":
+    st.title("📝 Extrair texto de DOCX")
+    st.caption("Extraia texto de documentos Word no formato `.docx`.")
 
-# ============================================================
-# COLUNA 1: UPLOAD E EXTRAÇÃO
-# ============================================================
+    uploaded_file = st.file_uploader(
+        "Envie um arquivo DOCX",
+        type=["docx"]
+    )
 
-with col1:
-    st.header("1️⃣ Upload do Documento")
+    if uploaded_file:
+        if st.button("Extrair texto"):
+            try:
+                text = extract_text_from_docx(uploaded_file)
 
-    try:
-        uploaded_file = st.file_uploader(
-            "📁 Escolha um arquivo",
-            type=["pdf", "docx", "html", "txt"],
-            help=f"Suporta: PDF, DOCX, HTML e TXT (limite {LIMITE_UPLOAD_KB // 1024} MB)"
+                if not text:
+                    st.warning("Nenhum texto foi encontrado no DOCX.")
+                else:
+                    st.success("Texto extraído com sucesso!")
+                    st.text_area("Texto extraído", text, height=400)
+
+                    st.download_button(
+                        label="Baixar TXT",
+                        data=make_download_buffer(text),
+                        file_name=f"texto_docx_{now_suffix()}.txt",
+                        mime="text/plain"
+                    )
+
+            except Exception as e:
+                st.error(f"Erro ao extrair texto do DOCX: {e}")
+
+
+# =========================
+# Imagem - Remover fundo
+# =========================
+
+elif menu == "Imagem - Remover fundo":
+    st.title("🖼️ Remover fundo de imagem")
+    st.caption("Envie PNG, JPG, JPEG, WEBP, HEIC ou HEIF. A saída será PNG com transparência ou fundo personalizado.")
+
+    uploaded_file = st.file_uploader(
+        "Envie uma imagem",
+        type=["png", "jpg", "jpeg", "webp", "heic", "heif"]
+    )
+
+    col_config1, col_config2 = st.columns(2)
+
+    with col_config1:
+        background_option = st.selectbox(
+            "Fundo final",
+            ["Transparente", "Branco", "Preto", "Cor personalizada"]
         )
 
-        if uploaded_file is not None:
-            nome_arquivo = uploaded_file.name
-            tamanho_kb = uploaded_file.size / 1024
+    with col_config2:
+        custom_color = st.color_picker(
+            "Escolha a cor",
+            "#ffffff",
+            disabled=background_option != "Cor personalizada"
+        )
 
-            # Limite rígido: interrompe o processamento se ultrapassar
-            if tamanho_kb > LIMITE_UPLOAD_KB:
-                st.error(
-                    f"❌ Arquivo muito grande ({tamanho_kb / 1024:.1f} MB). "
-                    f"O limite é {LIMITE_UPLOAD_KB / 1024:.0f} MB."
+    if uploaded_file:
+        try:
+            original_image = open_image_from_upload(uploaded_file)
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.image(original_image, caption="Imagem original", use_container_width=True)
+
+            if st.button("Remover fundo"):
+                try:
+                    from rembg import remove
+
+                    with st.spinner("Removendo fundo... isso pode levar alguns segundos."):
+                        input_png = image_to_png_bytes(original_image)
+                        output_bytes = remove(input_png)
+                        result_image = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
+                        result_image = apply_background(result_image, background_option, custom_color)
+
+                    with col2:
+                        st.image(result_image, caption="Resultado", use_container_width=True)
+
+                    output = io.BytesIO()
+
+                    if background_option == "Transparente":
+                        result_image.save(output, format="PNG")
+                        file_name = f"imagem_sem_fundo_{now_suffix()}.png"
+                        mime = "image/png"
+                    else:
+                        result_image.save(output, format="JPEG", quality=95, optimize=True)
+                        file_name = f"imagem_sem_fundo_{now_suffix()}.jpg"
+                        mime = "image/jpeg"
+
+                    output.seek(0)
+
+                    st.success("Fundo removido com sucesso!")
+
+                    st.download_button(
+                        label="Baixar resultado",
+                        data=output,
+                        file_name=file_name,
+                        mime=mime
+                    )
+
+                except Exception as e:
+                    st.error(f"Erro ao remover fundo: {e}")
+
+        except Exception as e:
+            st.error(e)
+
+
+# =========================
+# Imagem - Converter imagem
+# =========================
+
+elif menu == "Imagem - Converter imagem":
+    st.title("🔁 Converter imagem")
+    st.caption("Converta imagens entre PNG, JPG e WEBP. HEIC/HEIF também são aceitos como entrada.")
+
+    uploaded_file = st.file_uploader(
+        "Envie uma imagem",
+        type=["png", "jpg", "jpeg", "webp", "heic", "heif"]
+    )
+
+    output_format = st.selectbox(
+        "Formato de saída",
+        ["PNG", "JPG", "WEBP"]
+    )
+
+    quality = st.slider(
+        "Qualidade para JPG/WEBP",
+        min_value=10,
+        max_value=100,
+        value=90
+    )
+
+    if uploaded_file:
+        try:
+            image = open_image_from_upload(uploaded_file)
+            st.image(image, caption="Prévia", use_container_width=True)
+
+            if st.button("Converter imagem"):
+                if output_format == "PNG":
+                    data = image_to_png_bytes(image)
+                    file_name = f"imagem_convertida_{now_suffix()}.png"
+                    mime = "image/png"
+
+                elif output_format == "JPG":
+                    data = image_to_jpeg_bytes(image, quality=quality)
+                    file_name = f"imagem_convertida_{now_suffix()}.jpg"
+                    mime = "image/jpeg"
+
+                else:
+                    data = image_to_webp_bytes(image, quality=quality)
+                    file_name = f"imagem_convertida_{now_suffix()}.webp"
+                    mime = "image/webp"
+
+                st.success("Imagem convertida com sucesso!")
+
+                st.download_button(
+                    label="Baixar imagem convertida",
+                    data=make_download_buffer(data),
+                    file_name=file_name,
+                    mime=mime
                 )
+
+        except Exception as e:
+            st.error(f"Erro ao converter imagem: {e}")
+
+
+# =========================
+# Imagem - Redimensionar e comprimir
+# =========================
+
+elif menu == "Imagem - Redimensionar e comprimir":
+    st.title("📐 Redimensionar e comprimir imagem")
+    st.caption("Altere largura, altura, qualidade e formato final da imagem.")
+
+    uploaded_file = st.file_uploader(
+        "Envie uma imagem",
+        type=["png", "jpg", "jpeg", "webp", "heic", "heif"]
+    )
+
+    if uploaded_file:
+        try:
+            image = open_image_from_upload(uploaded_file)
+            original_width, original_height = image.size
+
+            st.info(f"Tamanho original: {original_width} x {original_height}px")
+            st.image(image, caption="Imagem original", use_container_width=True)
+
+            keep_ratio = st.checkbox("Manter proporção", value=True)
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                new_width = st.number_input(
+                    "Nova largura",
+                    min_value=1,
+                    max_value=10000,
+                    value=original_width
+                )
+
+            with col2:
+                if keep_ratio:
+                    new_height = int((new_width / original_width) * original_height)
+                    st.number_input(
+                        "Nova altura",
+                        min_value=1,
+                        max_value=10000,
+                        value=new_height,
+                        disabled=True
+                    )
+                else:
+                    new_height = st.number_input(
+                        "Nova altura",
+                        min_value=1,
+                        max_value=10000,
+                        value=original_height
+                    )
+
+            output_format = st.selectbox(
+                "Formato final",
+                ["PNG", "JPG", "WEBP"]
+            )
+
+            quality = st.slider(
+                "Qualidade para JPG/WEBP",
+                min_value=10,
+                max_value=100,
+                value=85
+            )
+
+            if st.button("Processar imagem"):
+                resized = image.resize((int(new_width), int(new_height)))
+
+                if output_format == "PNG":
+                    data = image_to_png_bytes(resized)
+                    file_name = f"imagem_redimensionada_{now_suffix()}.png"
+                    mime = "image/png"
+
+                elif output_format == "JPG":
+                    data = image_to_jpeg_bytes(resized, quality=quality)
+                    file_name = f"imagem_redimensionada_{now_suffix()}.jpg"
+                    mime = "image/jpeg"
+
+                else:
+                    data = image_to_webp_bytes(resized, quality=quality)
+                    file_name = f"imagem_redimensionada_{now_suffix()}.webp"
+                    mime = "image/webp"
+
+                st.success("Imagem processada com sucesso!")
+
+                st.download_button(
+                    label="Baixar imagem",
+                    data=make_download_buffer(data),
+                    file_name=file_name,
+                    mime=mime
+                )
+
+        except Exception as e:
+            st.error(f"Erro ao processar imagem: {e}")
+
+
+# =========================
+# Imagem - Imagens para PDF
+# =========================
+
+elif menu == "Imagem - Imagens para PDF":
+    st.title("🖼️ Converter imagens em PDF")
+    st.caption("Envie uma ou mais imagens e gere um único PDF.")
+
+    uploaded_files = st.file_uploader(
+        "Envie as imagens",
+        type=["png", "jpg", "jpeg", "webp", "heic", "heif"],
+        accept_multiple_files=True
+    )
+
+    if uploaded_files:
+        st.write(f"{len(uploaded_files)} imagem(ns) selecionada(s).")
+
+        if st.button("Gerar PDF"):
+            try:
+                images = []
+
+                for uploaded_file in uploaded_files:
+                    image = open_image_from_upload(uploaded_file)
+
+                    if image.mode in ("RGBA", "LA", "P"):
+                        bg = Image.new("RGB", image.size, "white")
+                        bg.paste(image.convert("RGBA"), mask=image.convert("RGBA").split()[-1])
+                        image = bg
+                    else:
+                        image = image.convert("RGB")
+
+                    images.append(image)
+
+                if not images:
+                    st.error("Nenhuma imagem válida foi enviada.")
+                    st.stop()
+
+                output = io.BytesIO()
+
+                first_image = images[0]
+                remaining_images = images[1:]
+
+                first_image.save(
+                    output,
+                    format="PDF",
+                    save_all=True,
+                    append_images=remaining_images
+                )
+
+                output.seek(0)
+
+                st.success("PDF gerado com sucesso!")
+
+                st.download_button(
+                    label="Baixar PDF",
+                    data=output,
+                    file_name=f"imagens_para_pdf_{now_suffix()}.pdf",
+                    mime="application/pdf"
+                )
+
+            except Exception as e:
+                st.error(f"Erro ao gerar PDF: {e}")
+
+
+# =========================
+# Texto - Traduzir
+# =========================
+
+elif menu == "Texto - Traduzir":
+    st.title("🌐 Traduzir texto")
+    st.caption("Cole um texto ou extraia de PDF/DOCX e traduza para outro idioma.")
+
+    source_mode = st.radio(
+        "Origem do texto",
+        ["Digitar/colar texto", "Extrair de PDF", "Extrair de DOCX"]
+    )
+
+    text = ""
+
+    if source_mode == "Digitar/colar texto":
+        text = st.text_area("Texto para traduzir", height=250)
+
+    elif source_mode == "Extrair de PDF":
+        uploaded_file = st.file_uploader("Envie um PDF", type=["pdf"])
+        if uploaded_file and st.button("Extrair texto do PDF"):
+            try:
+                text = extract_text_from_pdf(uploaded_file)
+                st.session_state["texto_para_traduzir"] = text
+            except Exception as e:
+                st.error(f"Erro ao extrair texto: {e}")
+
+        text = st.session_state.get("texto_para_traduzir", "")
+        if text:
+            st.text_area("Texto extraído", text, height=250)
+
+    else:
+        uploaded_file = st.file_uploader("Envie um DOCX", type=["docx"])
+        if uploaded_file and st.button("Extrair texto do DOCX"):
+            try:
+                text = extract_text_from_docx(uploaded_file)
+                st.session_state["texto_para_traduzir"] = text
+            except Exception as e:
+                st.error(f"Erro ao extrair texto: {e}")
+
+        text = st.session_state.get("texto_para_traduzir", "")
+        if text:
+            st.text_area("Texto extraído", text, height=250)
+
+    languages = {
+        "Português": "pt",
+        "Inglês": "en",
+        "Espanhol": "es",
+        "Francês": "fr",
+        "Italiano": "it",
+        "Alemão": "de",
+        "Japonês": "ja",
+        "Coreano": "ko",
+        "Chinês simplificado": "zh-CN"
+    }
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        source_lang_label = st.selectbox(
+            "Idioma de origem",
+            ["auto"] + list(languages.keys())
+        )
+
+    with col2:
+        target_lang_label = st.selectbox(
+            "Idioma de destino",
+            list(languages.keys()),
+            index=0
+        )
+
+    if st.button("Traduzir"):
+        try:
+            if not text.strip():
+                st.warning("Insira ou extraia um texto antes de traduzir.")
                 st.stop()
 
-            st.success(f"✅ Arquivo carregado: **{nome_arquivo}**")
-            st.info(f"📏 Tamanho: {tamanho_kb:.2f} KB")
+            source_lang = "auto" if source_lang_label == "auto" else languages[source_lang_label]
+            target_lang = languages[target_lang_label]
 
-            if tamanho_kb > 10000:
-                st.warning("⚠️ Arquivo grande - o processamento pode demorar")
+            chunks = chunk_text(text)
+            translated_parts = []
 
-            file_bytes = uploaded_file.getvalue()
+            with st.spinner("Traduzindo..."):
+                for chunk in chunks:
+                    translated = GoogleTranslator(
+                        source=source_lang,
+                        target=target_lang
+                    ).translate(chunk)
 
-            with st.spinner("📖 Extraindo texto..."):
-                if nome_arquivo.endswith(".txt"):
-                    st.session_state.texto_extraido = extrair_txt(file_bytes)
-                elif nome_arquivo.endswith(".pdf"):
-                    st.session_state.texto_extraido = extrair_pdf(file_bytes)
-                elif nome_arquivo.endswith(".docx"):
-                    st.session_state.texto_extraido = extrair_docx(file_bytes)
-                elif nome_arquivo.endswith(".html"):
-                    st.session_state.texto_extraido = extrair_html(file_bytes)
+                    translated_parts.append(translated)
 
-            if st.session_state.texto_extraido:
-                st.success("✨ Texto extraído com sucesso!")
+            final_text = "\n\n".join(translated_parts)
 
-                num_caracteres = len(st.session_state.texto_extraido)
-                num_blocos = len(dividir_em_blocos(st.session_state.texto_extraido, 3500))
-                num_palavras = len(st.session_state.texto_extraido.split())
+            st.success("Tradução concluída!")
+            st.text_area("Texto traduzido", final_text, height=350)
 
-                col_stat1, col_stat2, col_stat3 = st.columns(3)
-                with col_stat1:
-                    st.metric("📊 Caracteres", f"{num_caracteres:,}")
-                with col_stat2:
-                    st.metric("📝 Palavras", f"{num_palavras:,}")
-                with col_stat3:
-                    st.metric("📦 Blocos", num_blocos)
+            st.download_button(
+                label="Baixar tradução em TXT",
+                data=make_download_buffer(final_text),
+                file_name=f"traducao_{now_suffix()}.txt",
+                mime="text/plain"
+            )
 
-                st.subheader("👀 Prévia do Texto")
-                preview_text = st.session_state.texto_extraido[:500] + "..." if num_caracteres > 500 else st.session_state.texto_extraido
-                st.text_area(
-                    "Primeiros 500 caracteres:",
-                    preview_text,
-                    height=150,
-                    disabled=True,
-                    key="preview_texto_extraido"
-                )
-            else:
-                st.error("❌ Não consegui extrair o texto. Verifique o arquivo.")
+        except Exception as e:
+            st.error(f"Erro ao traduzir texto: {e}")
+
+
+# =========================
+# Texto - Utilitários
+# =========================
+
+elif menu == "Texto - Utilitários":
+    st.title("🔤 Utilitários de texto")
+    st.caption("Conte palavras, limpe espaços e transforme texto rapidamente.")
+
+    text = st.text_area("Digite ou cole seu texto", height=250)
+
+    action = st.selectbox(
+        "Escolha uma ação",
+        [
+            "Contar palavras e caracteres",
+            "Converter para MAIÚSCULAS",
+            "Converter para minúsculas",
+            "Capitalizar frases",
+            "Remover espaços extras",
+            "Remover linhas vazias",
+            "Limpar quebras de linha"
+        ]
+    )
+
+    if st.button("Aplicar"):
+        if not text.strip():
+            st.warning("Insira um texto primeiro.")
+            st.stop()
+
+        result = text
+
+        if action == "Contar palavras e caracteres":
+            stats = text_stats(text)
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric("Palavras", stats["Palavras"])
+
+            with col2:
+                st.metric("Caracteres", stats["Caracteres"])
+
+            with col3:
+                st.metric("Linhas", stats["Linhas"])
+
+            st.json(stats)
 
         else:
-            st.info("👆 Envie um arquivo para começar")
+            if action == "Converter para MAIÚSCULAS":
+                result = text.upper()
 
-    except Exception as e:
-        st.error(f"❌ Erro no upload: {e}")
+            elif action == "Converter para minúsculas":
+                result = text.lower()
 
-# ============================================================
-# COLUNA 2: FERRAMENTAS E SAÍDA
-# ============================================================
+            elif action == "Capitalizar frases":
+                result = ". ".join(sentence.strip().capitalize() for sentence in text.split(". "))
 
-with col2:
-    st.header("2️⃣ Ferramentas e Saída")
+            elif action == "Remover espaços extras":
+                result = re.sub(r"[ \t]+", " ", text)
+                result = re.sub(r" *\n *", "\n", result)
 
-    if st.session_state.texto_extraido:
+            elif action == "Remover linhas vazias":
+                result = "\n".join(line for line in text.splitlines() if line.strip())
 
-        tab1, tab2, tab3, tab4 = st.tabs(["🌍 Tradução", "🔊 Áudio", "🔄 Conversão", "📥 Download"])
+            elif action == "Limpar quebras de linha":
+                result = " ".join(line.strip() for line in text.splitlines() if line.strip())
 
-        # ========== ABA 1: TRADUÇÃO ==========
-        with tab1:
-            st.subheader("Tradução Avançada")
+            st.success("Texto processado!")
+            st.text_area("Resultado", result, height=250)
 
-            idiomas = {
-                "en": "🇺🇸 Inglês",
-                "es": "🇪🇸 Espanhol",
-                "pt": "🇧🇷 Português",
-                "fr": "🇫🇷 Francês",
-                "it": "🇮🇹 Italiano",
-                "de": "🇩🇪 Alemão",
-                "ja": "🇯🇵 Japonês",
-                "zh-cn": "🇨🇳 Chinês (Simplificado)",
-                "ru": "🇷🇺 Russo",
-                "ar": "🇸🇦 Árabe"
-            }
-
-            st.session_state.idioma_destino = st.selectbox(
-                "Traduzir para:",
-                options=list(idiomas.keys()),
-                format_func=lambda x: idiomas[x],
-                key="select_idioma"
-            )
-
-            col_btn1, col_btn2 = st.columns(2)
-
-            with col_btn1:
-                if st.button("🚀 Traduzir", type="primary", use_container_width=True, key="btn_traduzir"):
-                    st.session_state.texto_resultado = traduzir_com_chunking(
-                        st.session_state.texto_extraido,
-                        st.session_state.idioma_destino
-                    )
-
-            with col_btn2:
-                if st.button("🗑️ Limpar", use_container_width=True, key="btn_limpar_traducao"):
-                    st.session_state.texto_resultado = ""
-
-            if st.session_state.texto_resultado:
-                st.success("✨ Tradução concluída!")
-                st.text_area(
-                    "Resultado da tradução:",
-                    st.session_state.texto_resultado,
-                    height=250,
-                    disabled=True,
-                    key="preview_traducao"
-                )
-
-        # ========== ABA 2: ÁUDIO ==========
-        with tab2:
-            st.subheader("Conversão para Áudio")
-
-            if st.session_state.texto_resultado:
-                texto_para_audio = st.session_state.texto_resultado
-                idioma_audio = st.session_state.idioma_destino
-                label_audio = "🎤 Gerar Áudio da Tradução"
-            else:
-                texto_para_audio = st.session_state.texto_extraido
-                idioma_audio = "pt"
-                label_audio = "🎤 Gerar Áudio do Texto Original"
-
-            st.info(f"📢 Será gerado em: {'Português' if idioma_audio == 'pt' else 'Outro idioma'}")
-            st.warning("⚠️ Apenas os primeiros 5.000 caracteres serão convertidos")
-
-            if st.button(label_audio, type="primary", use_container_width=True, key="btn_gerar_audio"):
-                arquivo_audio = gerar_audio(texto_para_audio, idioma_audio)
-
-                if arquivo_audio:
-                    st.audio(arquivo_audio, format="audio/mp3")
-
-                    st.download_button(
-                        label="📥 Baixar Áudio (MP3)",
-                        data=arquivo_audio,
-                        file_name=f"docutools_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3",
-                        mime="audio/mp3",
-                        use_container_width=True,
-                        key="download_audio"
-                    )
-
-        # ========== ABA 3: CONVERSÃO ==========
-        with tab3:
-            st.subheader("🔄 Converter para Múltiplos Formatos")
-
-            col_conv1, col_conv2 = st.columns(2)
-
-            with col_conv1:
-                if st.button("📄 Converter para PDF", use_container_width=True, key="btn_conv_pdf"):
-                    resultado = converter_para_pdf(st.session_state.texto_extraido)
-                    if resultado:
-                        st.download_button(
-                            "💾 Baixar PDF",
-                            resultado,
-                            f"documento_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                            "application/pdf",
-                            use_container_width=True,
-                            key="download_pdf"
-                        )
-
-                if st.button("📋 Converter para DOCX", use_container_width=True, key="btn_conv_docx"):
-                    resultado = converter_para_docx(st.session_state.texto_extraido)
-                    if resultado:
-                        st.download_button(
-                            "💾 Baixar DOCX",
-                            resultado,
-                            f"documento_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx",
-                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                            use_container_width=True,
-                            key="download_docx"
-                        )
-
-                if st.button("🌐 Converter para HTML", use_container_width=True, key="btn_conv_html"):
-                    resultado = converter_para_html(st.session_state.texto_extraido)
-                    if resultado:
-                        st.download_button(
-                            "💾 Baixar HTML",
-                            resultado,
-                            f"documento_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
-                            "text/html",
-                            use_container_width=True,
-                            key="download_html"
-                        )
-
-            with col_conv2:
-                if st.button("🖼️ Converter para PNG", use_container_width=True, key="btn_conv_png"):
-                    resultado = converter_para_imagem(st.session_state.texto_extraido, 'png')
-                    if resultado:
-                        st.download_button(
-                            "💾 Baixar PNG",
-                            resultado,
-                            f"documento_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
-                            "image/png",
-                            use_container_width=True,
-                            key="download_png"
-                        )
-
-                if st.button("🖼️ Converter para JPG", use_container_width=True, key="btn_conv_jpg"):
-                    resultado = converter_para_imagem(st.session_state.texto_extraido, 'jpg')
-                    if resultado:
-                        st.download_button(
-                            "💾 Baixar JPG",
-                            resultado,
-                            f"documento_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg",
-                            "image/jpeg",
-                            use_container_width=True,
-                            key="download_jpg"
-                        )
-
-                if st.button("📝 Converter para TXT", use_container_width=True, key="btn_conv_txt"):
-                    st.download_button(
-                        "💾 Baixar TXT",
-                        st.session_state.texto_extraido.encode('utf-8'),
-                        f"documento_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                        "text/plain",
-                        use_container_width=True,
-                        key="download_txt"
-                    )
-
-        # ========== ABA 4: DOWNLOAD ==========
-        with tab4:
-            st.subheader("📥 Downloads Disponíveis")
-
-            st.write("**📝 Texto Original:**")
             st.download_button(
-                "📥 Baixar Texto Original (TXT)",
-                st.session_state.texto_extraido.encode('utf-8'),
-                f"original_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                "text/plain",
-                use_container_width=True,
-                key="download_original_txt"
+                label="Baixar TXT",
+                data=make_download_buffer(result),
+                file_name=f"texto_processado_{now_suffix()}.txt",
+                mime="text/plain"
             )
 
-            if st.session_state.texto_resultado:
-                st.write("**🌍 Texto Traduzido:**")
-                st.download_button(
-                    "📥 Baixar Tradução (TXT)",
-                    st.session_state.texto_resultado.encode('utf-8'),
-                    f"traducao_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                    "text/plain",
-                    use_container_width=True,
-                    key="download_traducao_txt"
-                )
 
-    else:
-        st.info("⏸️ Nenhum texto extraído. Envie um arquivo primeiro.")
+# =========================
+# Áudio - Texto para MP3
+# =========================
 
-# ============================================================
-# SEÇÃO 3: REMOVEDOR DE FUNDO
-# ============================================================
+elif menu == "Áudio - Texto para MP3":
+    st.title("🔊 Texto para MP3")
+    st.caption("Converta texto em áudio MP3 usando gTTS.")
 
-st.write("---")
-st.header("🎨 Removedor de Fundo de Imagem")
+    text = st.text_area("Digite ou cole o texto", height=250)
 
-col_img1, col_img2 = st.columns(2, gap="large")
+    languages = {
+        "Português": "pt",
+        "Inglês": "en",
+        "Espanhol": "es",
+        "Francês": "fr",
+        "Italiano": "it",
+        "Alemão": "de",
+        "Japonês": "ja",
+        "Coreano": "ko"
+    }
 
-uploaded_image = None
+    language_label = st.selectbox(
+        "Idioma da voz",
+        list(languages.keys()),
+        index=0
+    )
 
-with col_img1:
-    st.subheader("Upload da Imagem")
+    slow = st.checkbox("Falar mais devagar", value=False)
 
-    if HAS_REMBG:
-        uploaded_image = st.file_uploader(
-            "📸 Escolha uma imagem",
-            type=["png", "jpg", "jpeg"],
-            key="image_uploader",
-            help="Suporta: PNG, JPG, JPEG"
-        )
+    if st.button("Gerar MP3"):
+        try:
+            if not text.strip():
+                st.warning("Insira um texto primeiro.")
+                st.stop()
 
-        if uploaded_image is not None:
-            img = Image.open(uploaded_image)
-            st.image(img, caption="Imagem Original", use_container_width=True)
+            lang = languages[language_label]
 
-            st.write(f"Dimensões: {img.size[0]}x{img.size[1]} pixels")
-            st.write(f"Tamanho: {uploaded_image.size / 1024:.2f} KB")
+            with st.spinner("Gerando áudio..."):
+                tts = gTTS(text=text, lang=lang, slow=slow)
+                output = io.BytesIO()
+                tts.write_to_fp(output)
+                output.seek(0)
 
-    else:
-        st.error("❌ Removedor de fundo desativado. Biblioteca 'rembg' não está instalada.")
-        st.info("Para ativar, adicione 'rembg' ao requirements.txt")
+            st.success("Áudio gerado com sucesso!")
 
-with col_img2:
-    st.subheader("Processamento")
+            st.audio(output, format="audio/mp3")
 
-    if HAS_REMBG and uploaded_image is not None:
-        if st.button("🎨 Remover Fundo", type="primary", use_container_width=True, key="btn_remover_fundo"):
-            resultado = remover_fundo_imagem(uploaded_image)
+            output.seek(0)
 
-            if resultado:
-                st.success("✨ Fundo removido com sucesso!")
+            st.download_button(
+                label="Baixar MP3",
+                data=output,
+                file_name=f"audio_{now_suffix()}.mp3",
+                mime="audio/mpeg"
+            )
 
-                img_resultado = Image.open(io.BytesIO(resultado))
-                st.image(img_resultado, caption="Imagem Sem Fundo", use_container_width=True)
-
-                st.download_button(
-                    "📥 Baixar Imagem Sem Fundo",
-                    resultado,
-                    f"sem_fundo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
-                    "image/png",
-                    use_container_width=True,
-                    key="download_sem_fundo"
-                )
-    else:
-        st.info("👆 Envie uma imagem para remover o fundo")
-
-# ============================================================
-# RODAPÉ
-# ============================================================
-
-st.write("---")
-col_footer1, col_footer2, col_footer3 = st.columns(3)
-
-with col_footer1:
-    st.caption("🛠️ Desenvolvido com Streamlit")
-
-with col_footer2:
-    st.caption("🔒 Totalmente Open-source")
-
-with col_footer3:
-    st.caption("⚡ Rápido e Seguro")
+        except Exception as e:
+            st.error(f"Erro ao gerar áudio: {e}")
