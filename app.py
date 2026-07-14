@@ -1,118 +1,122 @@
 import streamlit as st
 import pdfplumber
-import os
 import time
+import pytesseract
 from docx import Document
 from io import BytesIO
 from deep_translator import GoogleTranslator
 from gtts import gTTS
 from rembg import remove
 from PIL import Image
+from pdf2image import convert_from_bytes
 
-# Configuração da Página
+# Configuração
 st.set_page_config(page_title="DocuTools Pro", page_icon="📄", layout="wide")
 
-# --- FUNÇÕES DE SUPORTE ---
+# --- FUNÇÕES DE NÚCLEO ---
 
 def call_with_retry(func, *args, retries=3, delay=1, **kwargs):
-    """Executa funções de rede (tradução/áudio) com tentativas automáticas."""
+    """Tenta executar uma função de rede várias vezes em caso de falha."""
     for i in range(retries):
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            if i == retries - 1: raise e
+            if i == retries - 1: return None
             time.sleep(delay * (2 ** i))
     return None
 
 @st.cache_data
-def extrair_texto(file_bytes, file_type):
-    """Extrai texto de PDF, DOCX ou TXT com cache."""
+def extrair_texto_total(file_bytes, file_name, file_type):
+    """Extrai texto de arquivos. Se o PDF for imagem, tenta usar OCR."""
+    text = ""
     try:
         if "pdf" in file_type:
             with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-                return "\n".join([p.extract_text() or "" for p in pdf.pages])
+                text = "\n".join([p.extract_text() or "" for p in pdf.pages])
+            
+            # Se o texto vier vazio (PDF escaneado), usa OCR
+            if len(text.strip()) < 10:
+                with st.spinner("PDF parece ser imagem. Iniciando OCR (Tesseract)..."):
+                    images = convert_from_bytes(file_bytes)
+                    text = "\n".join([pytesseract.image_to_string(img, lang='por+eng') for img in images])
         elif "officedocument" in file_type:
             doc = Document(BytesIO(file_bytes))
-            return "\n".join([para.text for para in doc.paragraphs])
+            text = "\n".join([para.text for para in doc.paragraphs])
+        elif "image" in file_type:
+            img = Image.open(BytesIO(file_bytes))
+            text = pytesseract.image_to_string(img, lang='por+eng')
         else:
-            return file_bytes.decode("utf-8")
+            text = file_bytes.decode("utf-8")
+        return text
     except Exception as e:
-        return f"Erro na extração: {str(e)}"
+        return f"Erro ao processar arquivo: {str(e)}"
 
-def traduzir_texto_robusto(texto, origem, destino):
-    """Traduz parágrafo por parágrafo para preservar a formatação original."""
+def traduzir_formatado(texto, origem, destino):
+    """Traduz parágrafo por parágrafo para manter a estrutura do documento."""
     if not texto.strip(): return ""
     
     translator = GoogleTranslator(source=origem, target=destino)
-    paragrafos = texto.split('\n')
-    traduzidos = []
+    linhas = texto.split('\n')
+    resultado = []
     
-    progresso = st.progress(0, text="Traduzindo parágrafos...")
-    for i, p in enumerate(paragrafos):
-        if p.strip():
-            # Tradução linha a linha evita que o Google 'esmague' o texto
-            t = call_with_retry(translator.translate, p)
-            traduzidos.append(t if t else p)
+    barra = st.progress(0, text="Traduzindo conteúdo...")
+    for i, linha in enumerate(linhas):
+        if linha.strip():
+            # Tradução individual evita perda de formatação
+            trad = call_with_retry(translator.translate, linha)
+            resultado.append(trad if trad else linha)
         else:
-            traduzidos.append("")
-        progresso.progress((i + 1) / len(paragrafos))
+            resultado.append("")
+        barra.progress((i + 1) / len(linhas))
     
-    progresso.empty()
-    return "\n".join(traduzidos)
+    barra.empty()
+    return "\n".join(resultado)
 
-# --- INTERFACE PRINCIPAL ---
+# --- UI ---
 
-st.title("📄 DocuTools Pro")
-st.markdown("---")
+st.title("🚀 DocuTools Pro")
+st.caption("Processamento avançado de Documentos e IA")
 
-tab1, tab2, tab3, tab4 = st.tabs(["🌐 Tradutor Pro", "🖼️ Imagem IA", "🔊 Texto para Voz", "📂 PDF Tools"])
+tabs = st.tabs(["🌐 Tradutor & OCR", "🖼️ Imagem IA", "🔊 Voz", "🛠️ Extras"])
 
-with tab1:
-    st.subheader("Tradução de Documentos (Preserva Formato)")
-    file = st.file_uploader("Upload PDF, DOCX, TXT", type=["pdf", "docx", "txt"], key="tr1")
+with tabs[0]:
+    st.subheader("Extração e Tradução Inteligente")
+    f = st.file_uploader("Suba seu arquivo (PDF, Imagem, DOCX)", type=["pdf", "docx", "txt", "png", "jpg"], key="u1")
     
-    c1, c2 = st.columns(2)
-    with c1: ori = st.selectbox("Origem", ["auto", "en", "es", "fr", "de", "pt"], index=0)
-    with c2: dest = st.selectbox("Destino", ["pt", "en", "es", "fr", "de"], index=0)
+    col1, col2 = st.columns(2)
+    with col1: de = st.selectbox("Idioma Original", ["auto", "en", "pt", "es", "fr"], index=0)
+    with col2: para = st.selectbox("Traduzir para", ["pt", "en", "es", "fr"], index=0)
     
-    if file and st.button("Traduzir Agora", type="primary"):
-        with st.spinner("Lendo arquivo..."):
-            original = extrair_texto(file.getvalue(), file.type)
-        
-        traduzido = traduzir_texto_robusto(original, ori, dest)
-        
-        st.text_area("Resultado:", traduzido, height=300)
-        st.download_button("Baixar Tradução (.txt)", traduzido, file_name="traduzido.txt")
+    if f:
+        if st.button("Processar Documento", type="primary"):
+            raw_text = extrair_texto_total(f.getvalue(), f.name, f.type)
+            
+            st.info("Texto extraído com sucesso. Iniciando tradução...")
+            final_text = traduzir_formatado(raw_text, de, para)
+            
+            st.text_area("Resultado Final:", final_text, height=400)
+            st.download_button("Baixar TXT", final_text, file_name=f"DocuTools_{f.name}.txt")
 
-with tab2:
-    st.subheader("Remover Fundo de Imagem")
-    img_file = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"], key="img1")
-    if img_file:
-        col_a, col_b = st.columns(2)
-        col_a.image(img_file, caption="Original")
-        
-        if st.button("Remover Fundo"):
-            with st.spinner("IA processando..."):
-                output = remove(img_file.getvalue())
-                col_b.image(output, caption="Resultado")
-                st.download_button("Baixar PNG", output, "sem_fundo.png", "image/png")
+with tabs[1]:
+    st.subheader("Remoção de Fundo (IA)")
+    img_f = st.file_uploader("Selecione uma foto", type=["jpg", "png"], key="u2")
+    if img_f and st.button("Remover Fundo"):
+        with st.spinner("Processando IA..."):
+            res = remove(img_f.getvalue())
+            st.image(res, width=400)
+            st.download_button("Baixar PNG", res, "resultado.png")
 
-with tab3:
-    st.subheader("Gerador de Áudio (MP3)")
-    audio_text = st.text_area("Texto para converter:", "Olá, este é o DocuTools Pro.")
-    if st.button("Gerar Áudio"):
-        with st.spinner("Sintetizando..."):
-            tts = gTTS(text=audio_text, lang='pt')
-            audio_fp = BytesIO()
-            tts.write_to_fp(audio_fp)
-            st.audio(audio_fp)
+with tabs[2]:
+    st.subheader("Transformar Texto em Áudio")
+    t_audio = st.text_area("Digite o texto:", "DocuTools Pro facilita seu trabalho.")
+    if st.button("Gerar MP3"):
+        tts = gTTS(text=t_audio, lang='pt')
+        fp = BytesIO()
+        tts.write_to_fp(fp)
+        st.audio(fp)
 
-with tab4:
-    st.subheader("Utilitários de PDF")
-    st.info("Ferramentas de mesclagem e compressão em desenvolvimento para esta versão.")
-
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/281/281760.png", width=50)
-st.sidebar.title("Configurações")
-if st.sidebar.button("Limpar Cache"):
+st.sidebar.markdown("### Status do Sistema")
+st.sidebar.success("Servidor Ativo")
+if st.sidebar.button("Limpar Tudo"):
     st.cache_data.clear()
     st.rerun()
