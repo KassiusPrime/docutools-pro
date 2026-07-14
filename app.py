@@ -68,11 +68,26 @@ def traduzir_bloco(texto, de, para):
                 ]
             )
             return res.choices[0].message.content
-        except:
-            pass # Fallback se a API falhar ou acabar o crédito
+        except Exception:
+            pass # Se a OpenAI falhar, tenta o Google
     
-    # Fallback Gratuito
-    return GoogleTranslator(source='auto', target=para.lower()[:2]).translate(texto)
+    # --- Mapeamento CORRETO para o Google Translator ---
+    # Transforma a palavra do seletor no código exato que o Google exige
+    mapa_idiomas = {
+        "Portuguese": "pt",
+        "English": "en",
+        "Spanish": "es",
+        "French": "fr",
+        "Auto-Detectar": "auto"
+    }
+    
+    try:
+        codigo_destino = mapa_idiomas.get(para, "pt")
+        # source_code = mapa_idiomas.get(de, "auto") se quiser forçar a origem
+        tradutor = GoogleTranslator(source='auto', target=codigo_destino)
+        return tradutor.translate(texto)
+    except Exception as e:
+        return f"[Erro no tradutor gratuito: {str(e)}]"
 
 # 3. Interface (UI)
 
