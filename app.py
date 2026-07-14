@@ -3,13 +3,20 @@ import pdfplumber
 import time
 import pytesseract
 import openai
+import os
 from docx import Document
 from io import BytesIO
 from deep_translator import GoogleTranslator
 from gtts import gTTS
-from rembg import remove
 from PIL import Image
 from pdf2image import convert_from_bytes
+
+# Proteção para o rembg (evita que o app inteiro caia se a IA falhar)
+try:
+    from rembg import remove
+    REMBG_AVAILABLE = True
+except Exception:
+    REMBG_AVAILABLE = False
 
 # 1. Configurações Iniciais
 st.set_page_config(page_title="DocuTools Pro", page_icon="🚀", layout="wide")
@@ -106,13 +113,18 @@ with tabs[0]:
 
 with tabs[1]:
     st.subheader("Remoção de Fundo Profissional")
-    img_arq = st.file_uploader("Escolha uma imagem", type=["jpg", "png"], key="img")
-    if img_arq and st.button("Remover Fundo"):
-        with st.spinner("IA processando imagem..."):
-            saida = remove(img_arq.getvalue())
-            st.image(saida, width=400)
-            st.download_button("Baixar PNG", saida, "sem_fundo.png")
-
+    if not REMBG_AVAILABLE:
+        st.error("O motor de remoção de fundo não pôde ser carregado no servidor. Tente reiniciar o app.")
+    else:
+        img_arq = st.file_uploader("Escolha uma imagem", type=["jpg", "png"], key="img")
+        if img_arq and st.button("Remover Fundo"):
+            with st.spinner("IA processando imagem..."):
+                try:
+                    saida = remove(img_arq.getvalue())
+                    st.image(saida, width=400)
+                    st.download_button("Baixar PNG", saida, "sem_fundo.png")
+                except Exception as e:
+                    st.error(f"Erro ao processar imagem: {e}")
 with tabs[2]:
     st.subheader("Texto para Áudio (MP3)")
     txt_voz = st.text_area("Texto:", "DocuTools Pro transformando seu fluxo de trabalho.")
