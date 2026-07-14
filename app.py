@@ -55,6 +55,17 @@ def extrair_texto_completo(file_bytes, file_type):
     except Exception as e:
         return f"Erro na extração: {e}"
 
+# Mapeamento explícito de idiomas (nome exibido -> código do Google)
+IDIOMAS = {
+    "Auto-Detectar": "auto",
+    "Portuguese": "pt",
+    "English": "en",
+    "Spanish": "es",
+    "French": "fr",
+    "German": "de",
+    "Italian": "it",
+}
+
 def traduzir_bloco(texto, de, para):
     """Traduz usando GPT-4o-mini (Pro) ou Google (Free)"""
     if API_KEY:
@@ -68,27 +79,16 @@ def traduzir_bloco(texto, de, para):
                 ]
             )
             return res.choices[0].message.content
-        except Exception:
-            pass # Se a OpenAI falhar, tenta o Google
-    
-    # --- Mapeamento CORRETO para o Google Translator ---
-    # Transforma a palavra do seletor no código exato que o Google exige
-    mapa_idiomas = {
-        "Portuguese": "pt",
-        "English": "en",
-        "Spanish": "es",
-        "French": "fr",
-        "Auto-Detectar": "auto"
-    }
-    
-    try:
-        codigo_destino = mapa_idiomas.get(para, "pt")
-        # source_code = mapa_idiomas.get(de, "auto") se quiser forçar a origem
-        tradutor = GoogleTranslator(source='auto', target=codigo_destino)
-        return tradutor.translate(texto)
-    except Exception as e:
-        return f"[Erro no tradutor gratuito: {str(e)}]"
+        except:
+            pass  # Fallback para o tradutor gratuito
 
+    # Fallback Gratuito (Google) com códigos corretos
+    try:
+        codigo_origem = IDIOMAS.get(de, "auto")
+        codigo_destino = IDIOMAS.get(para, "pt")
+        return GoogleTranslator(source=codigo_origem, target=codigo_destino).translate(texto)
+    except Exception:
+        return texto  # Se falhar, mantém o original (nunca perde conteúdo)
 # 3. Interface (UI)
 
 st.title("🚀 DocuTools Pro")
@@ -101,8 +101,8 @@ with tabs[0]:
     arq = st.file_uploader("Upload (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"], key="doc")
     
     col1, col2 = st.columns(2)
-    with col1: de_lang = st.selectbox("Idioma Original", ["Detectar", "English", "Portuguese", "Spanish"])
-    with col2: para_lang = st.selectbox("Traduzir para", ["Portuguese", "English", "Spanish", "French"])
+    with col1: de_lang = st.selectbox("Idioma Original", list(IDIOMAS.keys()), index=0)
+    with col2: para_lang = st.selectbox("Traduzir para", [k for k in IDIOMAS.keys() if k != "Auto-Detectar"], index=0)
     
     if arq and st.button("🚀 Iniciar Processamento"):
         with st.status("Executando motor de tradução...", expanded=True) as s:
