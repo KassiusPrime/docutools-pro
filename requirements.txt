@@ -6,3 +6,5 @@ gTTS
 rembg
 pillow
 onnxruntime
+pytesseract
+pdf2image
