@@ -8,3 +8,4 @@ pillow
 onnxruntime
 pytesseract
 pdf2image
+openai
