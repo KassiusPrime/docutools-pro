@@ -2,6 +2,7 @@ import io
 import os
 import re
 import html
+import time
 import zipfile
 from datetime import datetime
 
@@ -44,6 +45,29 @@ APP_ICON = "📘"
 APP_TAGLINE = "Converta, traduza, digitalize e organize documentos em segundos."
 MAX_FILE_SIZE_MB = 50
 MAX_OCR_PAGES = 10
+
+# Marcador estrutural inserido na extração de PDF (ex.: "--- Página 3 ---").
+# Precisa ser reconhecido para NÃO ser enviado ao tradutor junto do conteúdo,
+# senão ele quebra a estrutura do texto traduzido.
+PAGE_MARKER_PATTERN = re.compile(r"^--- Página \d+ ---$")
+
+
+def call_with_retry(func, *args, max_tentativas=3, delay_base=1.5, **kwargs):
+    """
+    Executa uma função com retry e backoff exponencial.
+    Usado em toda chamada que depende de rede (tradução, TTS, remoção de
+    fundo) para evitar que uma falha temporária (rate limit, timeout)
+    derrube a operação inteira ou gere resultado incompleto.
+    """
+    ultimo_erro = None
+    for tentativa in range(max_tentativas):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            ultimo_erro = e
+            if tentativa < max_tentativas - 1:
+                time.sleep(delay_base ** tentativa)
+    raise ultimo_erro
 
 ICONS = {
     "file-text": "📄",
@@ -169,85 +193,137 @@ def make_download_buffer(data):
     return buffer
 
 
-def chunk_text(text, max_chars=4500):
-    text = text.strip()
-    if not text:
-        return []
-
-    chunks = []
-    current = ""
-
-    for paragraph in text.splitlines():
-        paragraph = paragraph.strip()
-        if not paragraph:
-            continue
-
-        if len(paragraph) > max_chars:
-            if current:
-                chunks.append(current.strip())
-                current = ""
-            for i in range(0, len(paragraph), max_chars):
-                chunks.append(paragraph[i:i + max_chars])
-            continue
-
-        if len(current) + len(paragraph) + 1 <= max_chars:
-            current += paragraph + "\n"
-        else:
-            if current:
-                chunks.append(current.strip())
-            current = paragraph + "\n"
-
-    if current.strip():
-        chunks.append(current.strip())
-
-    return chunks
-
-
 def protect_glossary_terms(text, glossary_terms):
+    """
+    Substitui termos do glossário por marcadores entre colchetes especiais
+    (ex.: ⟦0⟧). Esse formato sobrevive muito melhor à tradução do que texto
+    alfanumérico puro, que o Google Translate às vezes recapitaliza ou separa
+    com espaços, quebrando a substituição na hora de restaurar.
+    """
     mapping = {}
     for idx, term in enumerate(glossary_terms):
         term = term.strip()
         if not term:
             continue
-        placeholder = f"ZXQTERM{idx}ZXQ"
-        mapping[placeholder] = term
-        text = text.replace(term, placeholder)
+        placeholder = f"⟦{idx}⟧"
+        mapping[str(idx)] = term
+        text = re.sub(re.escape(term), placeholder, text, flags=re.IGNORECASE)
     return text, mapping
 
 
 def restore_glossary_terms(text, mapping):
-    for placeholder, term in mapping.items():
-        text = text.replace(placeholder, term)
-    return text
+    """
+    Restaura os termos originais tolerando variações que a tradução possa
+    introduzir nos marcadores (espaços extras, colchetes normais no lugar
+    dos especiais, etc.).
+    """
+    def _replace(match):
+        idx = match.group(1)
+        return mapping.get(idx, match.group(0))
+
+    return re.sub(r"[⟦\[]\s*(\d+)\s*[⟧\]]", _replace, text)
+
+
+def split_long_paragraph(paragraph, max_chars=4500):
+    """
+    Divide um parágrafo muito longo em pedaços que cabem no limite do
+    tradutor, cortando por frases (nunca no meio de uma palavra) sempre
+    que possível.
+    """
+    if len(paragraph) <= max_chars:
+        return [paragraph]
+
+    sentences = re.split(r"(?<=[.!?])\s+", paragraph)
+    parts = []
+    current = ""
+
+    for sentence in sentences:
+        if len(current) + len(sentence) + 1 <= max_chars:
+            current = (current + " " + sentence).strip()
+        else:
+            if current:
+                parts.append(current)
+            if len(sentence) > max_chars:
+                for i in range(0, len(sentence), max_chars):
+                    parts.append(sentence[i:i + max_chars])
+                current = ""
+            else:
+                current = sentence
+
+    if current:
+        parts.append(current)
+
+    return parts
 
 
 def translate_text(text, source_lang, target_lang, glossary_terms=None):
+    """
+    Traduz linha por linha (parágrafo por parágrafo), em vez de juntar
+    vários parágrafos num único bloco antes de enviar ao tradutor.
+
+    Isso resolve dois problemas do método anterior:
+    1. Formatação quebrada: ao enviar um bloco com várias quebras de linha
+       de uma vez, o Google Translate frequentemente "achatava" o texto,
+       perdendo a separação entre parágrafos.
+    2. Tradução incompleta: um erro num bloco fazia o trecho inteiro ser
+       descartado (silenciosamente) ou interrompia toda a tradução. Agora,
+       cada linha tem retry próprio e, se mesmo assim falhar, o texto
+       original é preservado e marcado — nunca é simplesmente descartado.
+    """
     glossary_terms = glossary_terms or []
     protected_text, mapping = protect_glossary_terms(text, glossary_terms)
-    chunks = chunk_text(protected_text)
 
-    if not chunks:
-        return ""
+    paragraphs = protected_text.split("\n")
+    tradutor = GoogleTranslator(source=source_lang, target=target_lang)
 
-    translated_parts = []
+    translated_lines = []
     progress = st.progress(0)
     status = st.empty()
-    total_chunks = len(chunks)
+    total = max(len(paragraphs), 1)
+    falhas = 0
 
-    for index, chunk in enumerate(chunks, start=1):
-        status.info(f"Traduzindo parte {index} de {total_chunks}...")
-        translated = GoogleTranslator(
-            source=source_lang,
-            target=target_lang
-        ).translate(chunk)
-        translated = restore_glossary_terms(translated, mapping)
-        translated_parts.append(translated)
-        progress.progress(index / total_chunks)
+    for index, paragraph in enumerate(paragraphs, start=1):
+        stripped = paragraph.strip()
+        status.info(f"Traduzindo linha {index} de {total}...")
+
+        if not stripped:
+            translated_lines.append("")
+        elif PAGE_MARKER_PATTERN.match(stripped):
+            # Marcador estrutural (ex.: "--- Página 2 ---"): mantém sem
+            # traduzir para não corromper o layout do documento final.
+            translated_lines.append(stripped)
+        else:
+            try:
+                pedacos = split_long_paragraph(stripped)
+                traduzidos = []
+                for pedaco in pedacos:
+                    traduzido = call_with_retry(tradutor.translate, pedaco)
+                    if not traduzido:
+                        raise ValueError("Tradução retornou vazia.")
+                    traduzidos.append(traduzido)
+                    time.sleep(0.3)  # reduz chance de rate limit (erro 429)
+                linha_traduzida = " ".join(traduzidos)
+                translated_lines.append(restore_glossary_terms(linha_traduzida, mapping))
+            except Exception:
+                falhas += 1
+                # Preserva o texto original em vez de descartar, para a
+                # tradução nunca sair incompleta.
+                translated_lines.append(f"[Não traduzido] {stripped}")
+
+        progress.progress(index / total)
 
     progress.empty()
-    status.success("Tradução concluída.")
+    status.empty()
 
-    return "\n\n".join(translated_parts).strip()
+    if falhas:
+        st.warning(
+            f"{falhas} trecho(s) não puderam ser traduzidos após múltiplas tentativas "
+            "e foram mantidos no idioma original, marcados com [Não traduzido]."
+        )
+    else:
+        st.success("Tradução concluída sem erros.")
+
+    return "\n".join(translated_lines).strip()
 
 
 # ============================================================
@@ -1149,7 +1225,7 @@ elif menu == "🪄 Imagem - Remover fundo":
                     with st.status("Removendo fundo...", expanded=True) as status:
                         st.write("Carregando modelo de IA (pode demorar na primeira execução)...")
                         input_png = image_to_png_bytes(original_image)
-                        output_bytes = remove(input_png)
+                        output_bytes = call_with_retry(remove, input_png)
                         status.update(label="✅ Fundo removido!", state="complete", expanded=False)
 
                     result_image = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
@@ -1425,7 +1501,7 @@ elif menu == "🔊 Áudio - Texto para MP3":
             with st.spinner("Gerando áudio..."):
                 tts = gTTS(text=text, lang=lang, slow=slow)
                 output = io.BytesIO()
-                tts.write_to_fp(output)
+                call_with_retry(tts.write_to_fp, output)
                 output.seek(0)
 
             st.success("Áudio gerado com sucesso.")
