@@ -3,7 +3,7 @@ pdfplumber
 python-docx
 deep-translator
 gTTS
-rembg
+rembg==2.0.50
 pillow
 onnxruntime
 pytesseract
