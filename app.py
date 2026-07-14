@@ -11,12 +11,15 @@ from gtts import gTTS
 from PIL import Image
 from pdf2image import convert_from_bytes
 
-# Proteção para o rembg (evita que o app inteiro caia se a IA falhar)
+# Tentar carregar a IA de remoção de fundo de forma segura
 try:
     from rembg import remove
     REMBG_AVAILABLE = True
-except Exception:
+except Exception as e:
     REMBG_AVAILABLE = False
+    REMBG_ERROR = str(e)
+
+# ... (restante do código que te passei anteriormente)
 
 # 1. Configurações Iniciais
 st.set_page_config(page_title="DocuTools Pro", page_icon="🚀", layout="wide")
