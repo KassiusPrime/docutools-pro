@@ -1,5 +1,4 @@
 libheif1
-libheif-dev
 tesseract-ocr
 tesseract-ocr-por
 tesseract-ocr-eng
@@ -9,4 +8,3 @@ tesseract-ocr-deu
 poppler-utils
 fonts-dejavu-core
 libgl1
-libglib2.0-0
