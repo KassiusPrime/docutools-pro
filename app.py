@@ -2,6 +2,7 @@ import streamlit as st
 import pdfplumber
 import time
 import re
+import os
 import pytesseract
 import openai
 from docx import Document
@@ -11,13 +12,6 @@ from gtts import gTTS
 from PIL import Image
 from pdf2image import convert_from_bytes
 
-# Import protegido: se a IA de imagem falhar, o app continua vivo
-try:
-    from rembg import remove
-    REMBG_AVAILABLE = True
-except Exception:
-    REMBG_AVAILABLE = False
-
 # ---------------- CONFIGURAÇÃO ----------------
 st.set_page_config(page_title="DocuTools Pro", page_icon="🚀", layout="wide")
 
@@ -25,6 +19,8 @@ try:
     API_KEY = st.secrets.get("OPENAI_API_KEY", None)
 except Exception:
     API_KEY = None
+if not API_KEY:
+    API_KEY = os.environ.get("OPENAI_API_KEY", None)
 
 MAX_MB = 50
 MAX_OCR_PAGES = 25
@@ -41,14 +37,15 @@ IDIOMAS = {
 
 VOZES = {"Português": "pt", "Inglês": "en", "Espanhol": "es", "Francês": "fr"}
 
-# Estado persistente (resultados não somem ao clicar em "Baixar")
-for k in ("resultado", "nome_arquivo", "avisos", "img_resultado", "audio_mp3"):
+FORMATOS_IMG = {"PNG": "PNG", "JPEG": "JPEG", "WEBP": "WEBP", "BMP": "BMP"}
+
+for k in ("resultado", "nome_arquivo", "avisos", "img_processada",
+          "img_nome", "audio_mp3", "pdf_gerado"):
     st.session_state.setdefault(k, None)
 
 # ---------------- FUNÇÕES ----------------
 
 def call_with_retry(func, *args, retries=3, delay=1, **kwargs):
-    """Executa função de rede com até 3 tentativas e backoff exponencial."""
     for i in range(retries):
         try:
             return func(*args, **kwargs)
@@ -60,18 +57,16 @@ def call_with_retry(func, *args, retries=3, delay=1, **kwargs):
 
 
 def tem_conteudo_traduzivel(linha):
-    """Linhas sem letras (ex: '---', '123', '***') não vão ao tradutor."""
     return bool(re.search(r"[A-Za-zÀ-ÿ]", linha))
 
 
 @st.cache_data(show_spinner=False)
 def extrair_texto(file_bytes, file_type):
-    """Extrai texto de PDF/DOCX/TXT/Imagem. PDF escaneado -> OCR automático."""
     try:
         if "pdf" in file_type:
             with pdfplumber.open(BytesIO(file_bytes)) as pdf:
                 texto = "\n".join([p.extract_text() or "" for p in pdf.pages])
-            if len(texto.strip()) < 20:  # PDF de imagem -> OCR
+            if len(texto.strip()) < 20:
                 imagens = convert_from_bytes(
                     file_bytes, dpi=200, first_page=1, last_page=MAX_OCR_PAGES
                 )
@@ -130,7 +125,6 @@ def traduzir_bloco(texto, de, para):
 
 
 def traduzir_documento(texto, de, para):
-    """Parágrafo por parágrafo: estrutura idêntica ao original."""
     linhas = texto.split("\n")
     if not linhas:
         return "", 0
@@ -164,7 +158,7 @@ def gerar_docx(texto):
 st.title("🚀 DocuTools Pro")
 st.caption("Processamento inteligente de documentos — Tradução, OCR, Imagem e Áudio")
 
-tabs = st.tabs(["🌐 Tradução & OCR", "🖼️ Imagem IA", "🔊 Áudio", "⚙️ Sistema"])
+tabs = st.tabs(["🌐 Tradução & OCR", "🖼️ Ferramentas de Imagem", "🔊 Áudio", "⚙️ Sistema"])
 
 # ---- ABA 1: TRADUÇÃO ----
 with tabs[0]:
@@ -234,40 +228,88 @@ with tabs[0]:
                 key="dl_docx",
             )
 
-# ---- ABA 2: IMAGEM ----
+# ---- ABA 2: FERRAMENTAS DE IMAGEM (leves, sem IA) ----
 with tabs[1]:
-    st.subheader("Remoção de fundo com IA")
-    if not REMBG_AVAILABLE:
-        st.error("Motor de imagem indisponível no servidor. Reinicie o app.")
-    else:
-        img_arq = st.file_uploader(
-            "Envie uma imagem", type=["jpg", "png", "jpeg"], key="up_img"
-        )
+    st.subheader("Redimensionar, converter e gerar PDF")
+
+    ferramenta = st.radio(
+        "Escolha a ferramenta:",
+        ["📐 Redimensionar", "🔄 Converter formato", "📑 Imagens → PDF"],
+        horizontal=True,
+        key="img_tool",
+    )
+
+    if ferramenta == "📐 Redimensionar":
+        img_arq = st.file_uploader("Envie uma imagem", type=["jpg", "png", "jpeg", "webp", "bmp"], key="up_resize")
         if img_arq:
-            ca, cb = st.columns(2)
-            ca.image(img_arq, caption="Original", use_container_width=True)
+            img = Image.open(img_arq)
+            st.caption(f"Tamanho original: {img.width} × {img.height} px")
+            c1, c2 = st.columns(2)
+            nova_larg = c1.number_input("Largura (px)", 1, 10000, img.width)
+            nova_alt = c2.number_input("Altura (px)", 1, 10000, img.height)
+            manter = st.checkbox("Manter proporção", value=True)
 
-            if st.button("✨ Remover Fundo", key="btn_bg"):
-                with st.spinner("IA processando (1ª execução baixa o modelo)..."):
-                    saida = call_with_retry(remove, img_arq.getvalue(), retries=2)
-                if saida:
-                    st.session_state.img_resultado = saida
-                else:
-                    st.error("Falha ao processar. Tente novamente.")
+            if st.button("Redimensionar", key="btn_resize"):
+                if manter:
+                    ratio = nova_larg / img.width
+                    nova_alt = int(img.height * ratio)
+                redim = img.resize((int(nova_larg), int(nova_alt)), Image.LANCZOS)
+                buf = BytesIO()
+                fmt = "PNG" if img_arq.name.lower().endswith("png") else "JPEG"
+                if fmt == "JPEG" and redim.mode in ("RGBA", "P"):
+                    redim = redim.convert("RGB")
+                redim.save(buf, format=fmt)
+                st.session_state.img_processada = buf.getvalue()
+                st.session_state.img_nome = f"redimensionada.{fmt.lower()}"
+                st.image(st.session_state.img_processada, caption=f"{int(nova_larg)} × {int(nova_alt)} px")
 
-            if st.session_state.img_resultado:
-                cb.image(
-                    st.session_state.img_resultado,
-                    caption="Sem fundo",
-                    use_container_width=True,
-                )
-                st.download_button(
-                    "📥 Baixar PNG",
-                    st.session_state.img_resultado,
-                    "sem_fundo.png",
-                    "image/png",
-                    key="dl_png",
-                )
+    elif ferramenta == "🔄 Converter formato":
+        img_arq = st.file_uploader("Envie uma imagem", type=["jpg", "png", "jpeg", "webp", "bmp"], key="up_conv")
+        destino_fmt = st.selectbox("Converter para:", list(FORMATOS_IMG.keys()))
+        if img_arq and st.button("Converter", key="btn_conv"):
+            img = Image.open(img_arq)
+            if destino_fmt == "JPEG" and img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+            buf = BytesIO()
+            img.save(buf, format=FORMATOS_IMG[destino_fmt])
+            st.session_state.img_processada = buf.getvalue()
+            st.session_state.img_nome = f"convertida.{destino_fmt.lower()}"
+            st.success(f"Convertida para {destino_fmt}!")
+
+    elif ferramenta == "📑 Imagens → PDF":
+        imgs = st.file_uploader(
+            "Envie uma ou mais imagens (na ordem desejada)",
+            type=["jpg", "png", "jpeg"],
+            accept_multiple_files=True,
+            key="up_pdf",
+        )
+        if imgs and st.button("Gerar PDF", key="btn_imgpdf"):
+            paginas = []
+            for f in imgs:
+                im = Image.open(f)
+                if im.mode in ("RGBA", "P"):
+                    im = im.convert("RGB")
+                paginas.append(im)
+            buf = BytesIO()
+            paginas[0].save(buf, format="PDF", save_all=True, append_images=paginas[1:])
+            st.session_state.pdf_gerado = buf.getvalue()
+            st.success(f"PDF gerado com {len(paginas)} página(s)!")
+
+    if st.session_state.img_processada:
+        st.download_button(
+            "📥 Baixar imagem",
+            st.session_state.img_processada,
+            file_name=st.session_state.img_nome or "imagem.png",
+            key="dl_img",
+        )
+    if st.session_state.pdf_gerado:
+        st.download_button(
+            "📥 Baixar PDF",
+            st.session_state.pdf_gerado,
+            file_name="DocuTools_imagens.pdf",
+            mime="application/pdf",
+            key="dl_imgpdf",
+        )
 
 # ---- ABA 3: ÁUDIO ----
 with tabs[2]:
@@ -309,24 +351,26 @@ with tabs[3]:
     st.subheader("Status do sistema")
     c1, c2, c3 = st.columns(3)
     c1.metric("Motor de Tradução", "GPT-4o-mini" if API_KEY else "Google (grátis)")
-    c2.metric("Imagem IA", "Ativo" if REMBG_AVAILABLE else "Indisponível")
+    c2.metric("OCR", "Tesseract (por/eng)")
     c3.metric("Limite de upload", f"{MAX_MB} MB")
 
     if not API_KEY:
         st.info(
-            "💡 Configure OPENAI_API_KEY em Settings → Secrets no Streamlit Cloud "
+            "💡 Configure OPENAI_API_KEY nas variáveis de ambiente "
             "para ativar tradução premium."
         )
 
     if st.button("🧹 Limpar cache e resultados", key="btn_reset"):
         st.cache_data.clear()
-        for k in ("resultado", "nome_arquivo", "avisos", "img_resultado", "audio_mp3"):
+        for k in ("resultado", "nome_arquivo", "avisos", "img_processada",
+                  "img_nome", "audio_mp3", "pdf_gerado"):
             st.session_state[k] = None
         st.rerun()
 
 st.sidebar.markdown("### 🚀 DocuTools Pro")
-st.sidebar.caption("v3.0 — Estável")
+st.sidebar.caption("v3.1 — Leve e estável")
 st.sidebar.markdown("---")
 st.sidebar.write("✅ Tradução resiliente com retry")
 st.sidebar.write("✅ OCR automático (por/eng)")
-st.sidebar.write("✅ Resultados persistentes")
+st.sidebar.write("✅ Imagens: redimensionar, converter, PDF")
+st.sidebar.write("✅ Roda em 512 MB de RAM")
