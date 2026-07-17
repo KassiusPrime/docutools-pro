@@ -2,22 +2,8 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Estilos adicionais para barras de rolagem e suavização */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-track {
-  background: #0f172a;
-}
-::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 3px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #475569;
-}
-
-.custom-gradient {
-  background: linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%);
+body {
+  @apply bg-slate-50 text-slate-900;
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
 }
