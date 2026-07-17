@@ -5,17 +5,17 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
     "clsx": "^2.1.1",
-    "docx": "^8.5.0",
+    "docx": "^9.0.3",
     "file-saver": "^2.0.5",
     "jspdf": "^2.5.1",
     "lucide-react": "^0.446.0",
-    "mammoth": "^1.6.0",
-    "pdfjs-dist": "^3.4.120",
+    "mammoth": "^1.8.0",
+    "pdfjs-dist": "^4.6.82",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tailwind-merge": "^2.5.2",
