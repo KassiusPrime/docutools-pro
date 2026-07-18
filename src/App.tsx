@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { 
-  FileText, Image as ImageIcon, Volume2, Download, Trash2, Upload, 
-  Loader2, FileDown, FilePlus, Languages, Key, RefreshCw, Copy, Check, 
+import {
+  FileText, Image as ImageIcon, Volume2, Download, Trash2, Upload,
+  Loader2, FileDown, FilePlus, Languages, Key, RefreshCw, Copy, Check,
   Wand2, Settings2
 } from 'lucide-react';
 import { extractTextFromFile } from './lib/utils';
@@ -74,7 +74,7 @@ export default function App() {
     for (let i = 0; i < lines.length; i++) {
       if (cursorY > pdf.internal.pageSize.getHeight() - margin) { pdf.addPage(); cursorY = margin; }
       pdf.text(lines[i], margin, cursorY);
-      cursorY += 6; 
+      cursorY += 6;
     }
     pdf.save(`DocuTools_${prefix}.pdf`);
   };
@@ -115,6 +115,15 @@ export default function App() {
     finally { setIsAiWorking(false); }
   };
 
+  // Estava sendo usada no JSX (onChange={handleImagesSelected}) mas não
+  // existia no código — por isso a aba Imagens quebraria ao selecionar
+  // arquivos, mesmo com o build passando.
+  const handleImagesSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      setSelectedImages((prev) => [...prev, ...Array.from(e.target.files!)]);
+    }
+  };
+
   const processImages = async () => {
     if (selectedImages.length === 0) return;
     setIsProcessing(true);
@@ -124,12 +133,44 @@ export default function App() {
         const pdf = new jsPDF();
         for (let i = 0; i < selectedImages.length; i++) {
           const file = selectedImages[i];
-          const dataUrl = await new Promise<string>((res) => { const r = new FileReader(); r.onload = (e) => res(e.target?.result as string); r.readAsDataURL(file); });
-          const props = pdf.getImageProperties(dataUrl);
+
+          // Detecta o formato real do arquivo em vez de sempre assumir
+          // 'JPEG'. Passar 'JPEG' para um PNG com transparência corrompia
+          // a imagem (fundo virava preto) — por isso PNGs são achatados
+          // sobre um fundo branco antes de entrar no PDF.
+          const isPng = file.type === 'image/png';
+
+          const dataUrl = await new Promise<string>((res) => {
+            const r = new FileReader();
+            r.onload = (e) => res(e.target?.result as string);
+            r.readAsDataURL(file);
+          });
+
+          let finalDataUrl = dataUrl;
+          let format: 'PNG' | 'JPEG' = isPng ? 'PNG' : 'JPEG';
+
+          if (isPng) {
+            const img = new Image();
+            img.src = dataUrl;
+            await new Promise((resolve) => { img.onload = resolve; });
+
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d')!;
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0);
+
+            finalDataUrl = canvas.toDataURL('image/jpeg', 0.95);
+            format = 'JPEG';
+          }
+
+          const props = pdf.getImageProperties(finalDataUrl);
           const pageWidth = pdf.internal.pageSize.getWidth();
           const pageHeight = (props.height * pageWidth) / props.width;
           if (i > 0) pdf.addPage();
-          pdf.addImage(dataUrl, 'JPEG', 0, 0, pageWidth, pageHeight);
+          pdf.addImage(finalDataUrl, format, 0, 0, pageWidth, pageHeight);
           setProgress(Math.round(((i + 1) / selectedImages.length) * 100));
         }
         pdf.save('DocuTools_Imagens.pdf');
@@ -153,6 +194,22 @@ export default function App() {
       }
     } catch (err) { alert('Erro ao processar imagens.'); }
     finally { setIsProcessing(false); setProgress(0); }
+  };
+
+  // Estava sendo usada no JSX (onClick={speak}) mas não existia no
+  // código — por isso o botão "Reproduzir" da aba Voz quebraria o app
+  // (ReferenceError) assim que clicado.
+  const speak = () => {
+    const textToSpeak = aiText || extractedText;
+    if (!textToSpeak.trim()) {
+      alert("Nenhum texto disponível para ler.");
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(textToSpeak);
+    utterance.lang = ttsLang;
+    utterance.rate = ttsRate;
+    window.speechSynthesis.speak(utterance);
   };
 
   return (
@@ -228,6 +285,19 @@ export default function App() {
                 </button>
               ))}
             </div>
+            {aiAction === 'translate' && (
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-slate-700">Traduzir para:</label>
+                <select value={targetLang} onChange={(e) => setTargetLang(e.target.value)} className="w-full sm:w-48 bg-white border border-slate-200 rounded-xl px-4 py-2 font-bold text-slate-700 outline-none focus:border-indigo-500">
+                  <option value="Inglês">Inglês</option>
+                  <option value="Espanhol">Espanhol</option>
+                  <option value="Francês">Francês</option>
+                  <option value="Alemão">Alemão</option>
+                  <option value="Italiano">Italiano</option>
+                  <option value="Português">Português</option>
+                </select>
+              </div>
+            )}
             <div className="flex flex-col sm:flex-row gap-4">
               <textarea value={aiText || extractedText} onChange={(e) => setAiText(e.target.value)} placeholder="Texto original..." className="flex-1 h-64 p-4 bg-slate-50 border rounded-xl text-sm outline-none focus:border-indigo-500" />
               <button onClick={handleAiAction} disabled={isAiWorking} className="sm:w-32 bg-indigo-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2">
@@ -235,6 +305,19 @@ export default function App() {
               </button>
               <textarea value={aiText} readOnly placeholder="Resultado..." className="flex-1 h-64 p-4 bg-indigo-50/30 border border-indigo-100 rounded-xl text-sm outline-none" />
             </div>
+            {aiText && (
+              <div className="flex gap-3 justify-end border-t pt-4">
+                <button onClick={() => copyToClipboard(aiText, 'ai')} className="bg-slate-100 border px-4 py-2 rounded-lg font-bold text-sm flex items-center gap-2">
+                  {copiedAi ? <Check size={16} className="text-green-600" /> : <Copy size={16} />} Copiar
+                </button>
+                <button onClick={() => downloadTxt(aiText, 'IA')} className="bg-slate-900 text-white px-4 py-2 rounded-lg font-bold text-sm flex items-center gap-2">
+                  <Download size={16} /> TXT
+                </button>
+                <button onClick={() => downloadDocx(aiText, 'IA')} className="bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold text-sm flex items-center gap-2">
+                  <FileDown size={16} /> DOCX
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -256,7 +339,9 @@ export default function App() {
                     <option value="jpeg">Converter para JPG</option>
                     <option value="png">Converter para PNG</option>
                   </select>
-                  <button onClick={processImages} disabled={isProcessing} className="flex-1 w-full bg-violet-600 text-white py-4 rounded-xl font-bold">Iniciar Processamento</button>
+                  <button onClick={processImages} disabled={isProcessing} className="flex-1 w-full bg-violet-600 text-white py-4 rounded-xl font-bold">
+                    {isProcessing ? `Processando... ${progress}%` : 'Iniciar Processamento'}
+                  </button>
                 </div>
               </div>
             )}
@@ -273,9 +358,14 @@ export default function App() {
               <input type="range" min="0.5" max="2" step="0.1" value={ttsRate} onChange={(e) => setTtsRate(parseFloat(e.target.value))} className="flex-1 accent-orange-500" />
             </div>
             <textarea value={aiText || extractedText} onChange={(e) => setAiText(e.target.value)} className="w-full h-64 p-5 border rounded-2xl text-sm font-medium outline-none focus:border-orange-500" placeholder="Texto para leitura..." />
-            <button onClick={speak} className="w-full bg-orange-500 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2">
-              <Volume2 /> Reproduzir
-            </button>
+            <div className="flex flex-col sm:flex-row gap-4">
+              <button onClick={speak} className="flex-1 bg-orange-500 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2">
+                <Volume2 /> Reproduzir
+              </button>
+              <button onClick={() => window.speechSynthesis.cancel()} className="sm:w-40 bg-slate-900 text-white py-4 rounded-xl font-bold">
+                Silenciar
+              </button>
+            </div>
           </div>
         )}
       </main>
