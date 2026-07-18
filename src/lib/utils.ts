@@ -8,7 +8,7 @@ if (typeof window !== 'undefined') {
 
 export const extractTextFromFile = async (file: File, onProgress?: (p: number) => void): Promise<string> => {
   const type = file.type;
-  
+
   if (type === 'application/pdf') {
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
