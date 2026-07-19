@@ -159,7 +159,8 @@ export default function App() {
       else if (aiAction === 'improve') systemPrompt = "Melhore a fluidez e o vocabulário. Retorne APENAS o texto reescrito.";
 
       if (translationEngine === 'gemini') {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+        // Corrigido para a versão mais recente do modelo Flash
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -171,9 +172,10 @@ export default function App() {
         setAiText(data.candidates[0].content.parts[0].text);
       } 
       else {
+        // Lógica para Groq e OpenAI (Atualizado para gpt-4o-mini)
         const isGroq = translationEngine === 'groq';
         const url = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
-        const model = isGroq ? 'llama3-8b-8192' : 'gpt-3.5-turbo';
+        const model = isGroq ? 'llama3-8b-8192' : 'gpt-4o-mini';
 
         const response = await fetch(url, {
           method: 'POST',
@@ -232,7 +234,6 @@ export default function App() {
     setEditedImage('');
 
     try {
-      // Converte imagem para Base64
       const getBase64 = (file: File): Promise<string> => new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.readAsDataURL(file);
@@ -242,7 +243,6 @@ export default function App() {
 
       const base64Data = await getBase64(editSourceImage);
 
-      // Usando o modelo Instruct-Pix2Pix via HF Inference API
       const response = await fetch("https://api-inference.huggingface.co/models/timbrooks/instruct-pix2pix", {
         method: "POST",
         headers: {
@@ -251,7 +251,7 @@ export default function App() {
         },
         body: JSON.stringify({
           inputs: {
-            image: base64Data.split(',')[1], // Remove o prefixo do Data URL
+            image: base64Data.split(',')[1],
             prompt: editPrompt
           }
         }),
@@ -259,7 +259,6 @@ export default function App() {
 
       if (!response.ok) {
         const errorData = await response.json();
-        // A API gratuita da HuggingFace às vezes desliga o modelo quando ocioso. Se estiver carregando, ele avisa.
         if (errorData.error && errorData.error.includes("is currently loading")) {
            throw new Error("O modelo da IA está inicializando. Aguarde 20 segundos e tente de novo!");
         }
