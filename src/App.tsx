@@ -2,17 +2,17 @@ import React, { useState, useRef, useEffect } from 'react';
 import { 
   FileText, Image as ImageIcon, Volume2, Download, Trash2, Upload, 
   Loader2, FileDown, FilePlus, Languages, Key, RefreshCw, Copy, Check, 
-  Wand2, Settings2, Globe, Palette, DownloadCloud
+  Wand2, Settings2, Globe, Palette, DownloadCloud, ImagePlus, Paintbrush
 } from 'lucide-react';
 import { extractTextFromFile } from './lib/utils';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
 import { jsPDF } from 'jspdf';
 import { saveAs } from 'file-saver';
 
-// Adicionada a nova aba 'visual-ai'
 type TabType = 'extract' | 'ai' | 'image' | 'audio' | 'visual-ai';
 type AiActionType = 'translate' | 'summarize' | 'grammar' | 'improve';
 type EngineType = 'google' | 'openai' | 'gemini' | 'groq';
+type VisualTabType = 'generate' | 'edit';
 
 export default function App() {
   const [showSplash, setShowSplash] = useState(true);
@@ -45,10 +45,19 @@ export default function App() {
   const [translationEngine, setTranslationEngine] = useState<EngineType>('google');
   const [copiedAi, setCopiedAi] = useState(false);
 
-  // IA Visual Estados (Pollinations)
+  // IA Visual Estados (Pollinations & Hugging Face)
+  const [visualTab, setVisualTab] = useState<VisualTabType>('generate');
   const [imagePrompt, setImagePrompt] = useState('');
   const [generatedImage, setGeneratedImage] = useState('');
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+  
+  // Estados do Editor de Imagens
+  const [hfKey, setHfKey] = useState(() => localStorage.getItem('docutools_hf_key') || '');
+  const [editSourceImage, setEditSourceImage] = useState<File | null>(null);
+  const [editPrompt, setEditPrompt] = useState('');
+  const [editedImage, setEditedImage] = useState('');
+  const [isEditingImage, setIsEditingImage] = useState(false);
+  const editImageInputRef = useRef<HTMLInputElement>(null);
 
   const languageMap: Record<string, string> = {
     'en': 'Inglês', 'es': 'Espanhol', 'fr': 'Francês', 
@@ -65,6 +74,7 @@ export default function App() {
   const [ttsRate, setTtsRate] = useState(1);
 
   useEffect(() => { localStorage.setItem('docutools_apikey', apiKey); }, [apiKey]);
+  useEffect(() => { localStorage.setItem('docutools_hf_key', hfKey); }, [hfKey]);
 
   useEffect(() => {
     if (activeTab === 'ai' && extractedText && !aiText) { setAiText(extractedText); }
@@ -189,44 +199,92 @@ export default function App() {
     }
   };
 
-  // Função Geradora de Imagens com Pollinations
+  // ===================== IA VISUAL LOGIC =====================
+
   const handleGenerateImage = () => {
-    if (!imagePrompt.trim()) {
-      alert("Descreva a imagem que você deseja gerar.");
-      return;
-    }
+    if (!imagePrompt.trim()) return alert("Descreva a imagem que deseja gerar.");
     
     setIsGeneratingImage(true);
     setGeneratedImage('');
     
-    // Adiciona um fator aleatório (seed) para sempre gerar algo novo, mesmo com o mesmo texto
     const seed = Math.floor(Math.random() * 1000000);
     const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt)}?nologo=true&seed=${seed}`;
     
-    // Força o pré-carregamento invisível para só mostrar quando estiver pronta
     const img = new Image();
     img.src = url;
-    img.onload = () => {
-      setGeneratedImage(url);
-      setIsGeneratingImage(false);
-    };
-    img.onerror = () => {
-      alert("Ocorreu um erro ao gerar a imagem. Tente alterar algumas palavras.");
-      setIsGeneratingImage(false);
-    };
+    img.onload = () => { setGeneratedImage(url); setIsGeneratingImage(false); };
+    img.onerror = () => { alert("Erro ao gerar a imagem."); setIsGeneratingImage(false); };
   };
 
-  // Função para baixar a imagem gerada
-  const downloadGeneratedImage = async () => {
-    if (!generatedImage) return;
-    try {
-      const response = await fetch(generatedImage);
-      const blob = await response.blob();
-      saveAs(blob, `DocuTools_Arte_${Date.now()}.jpg`);
-    } catch (error) {
-      alert("Erro ao tentar salvar a imagem.");
+  const handleEditImageSource = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      setEditSourceImage(e.target.files[0]);
+      setEditedImage('');
     }
   };
+
+  const handleEditCommand = async () => {
+    if (!hfKey.trim()) return alert("Insira a chave do Hugging Face nas configurações da aba.");
+    if (!editSourceImage) return alert("Selecione uma imagem primeiro.");
+    if (!editPrompt.trim()) return alert("Digite o comando (ex: Make it look like a painting).");
+
+    setIsEditingImage(true);
+    setEditedImage('');
+
+    try {
+      // Converte imagem para Base64
+      const getBase64 = (file: File): Promise<string> => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = error => reject(error);
+      });
+
+      const base64Data = await getBase64(editSourceImage);
+
+      // Usando o modelo Instruct-Pix2Pix via HF Inference API
+      const response = await fetch("https://api-inference.huggingface.co/models/timbrooks/instruct-pix2pix", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${hfKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          inputs: {
+            image: base64Data.split(',')[1], // Remove o prefixo do Data URL
+            prompt: editPrompt
+          }
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        // A API gratuita da HuggingFace às vezes desliga o modelo quando ocioso. Se estiver carregando, ele avisa.
+        if (errorData.error && errorData.error.includes("is currently loading")) {
+           throw new Error("O modelo da IA está inicializando. Aguarde 20 segundos e tente de novo!");
+        }
+        throw new Error(errorData.error || 'Falha na comunicação com a API.');
+      }
+
+      const blob = await response.blob();
+      setEditedImage(URL.createObjectURL(blob));
+    } catch (error: any) {
+      alert(`Erro na Edição: ${error.message}`);
+    } finally {
+      setIsEditingImage(false);
+    }
+  };
+
+  const downloadVisualImage = async (url: string) => {
+    if (!url) return;
+    try {
+      const response = await fetch(url);
+      const blob = await response.blob();
+      saveAs(blob, `DocuTools_IA_${Date.now()}.jpg`);
+    } catch (error) { alert("Erro ao salvar."); }
+  };
+
+  // ===================== FIM IA VISUAL =====================
 
   const handleImagesSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -406,59 +464,116 @@ export default function App() {
               </button>
               <textarea value={aiText} readOnly placeholder="Resultado..." className="w-full h-48 p-4 bg-indigo-50/30 border border-indigo-100 rounded-xl text-sm outline-none" />
             </div>
-            
-            {aiText && (
-              <div className="flex gap-2 justify-end border-t pt-4">
-                <button onClick={() => copyToClipboard(aiText, 'ai')} className="bg-slate-100 border px-3 py-2 rounded-lg font-bold text-xs flex items-center gap-1">
-                  {copiedAi ? <Check size={14} className="text-green-600" /> : <Copy size={14} />} Copiar
-                </button>
-              </div>
-            )}
           </div>
         )}
 
-        {/* NOVA ABA: IA VISUAL (GERADOR DE IMAGENS) */}
+        {/* ================= ABA IA VISUAL ================= */}
         {activeTab === 'visual-ai' && (
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-5 sm:p-6 space-y-6 animate-in fade-in zoom-in-95 duration-200">
-            <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-4">
-               <label className="text-sm font-bold text-slate-700 flex items-center gap-2">
-                 <Palette size={18} className="text-pink-600" /> Gerador de Imagens IA (Grátis)
-               </label>
-               <p className="text-xs text-slate-500 font-medium pb-2">Descreva a imagem em detalhes. Dica: Prompts em inglês geram resultados melhores.</p>
-               
-               <textarea 
-                  value={imagePrompt} 
-                  onChange={(e) => setImagePrompt(e.target.value)} 
-                  placeholder="Ex: A futuristic city floating in the clouds, cyberpunk style, neon lights, 4k..." 
-                  className="w-full h-32 p-4 bg-white border border-slate-300 rounded-xl text-sm outline-none focus:border-pink-500 shadow-sm resize-none" 
-               />
-               
-               <button 
-                  onClick={handleGenerateImage} 
-                  disabled={isGeneratingImage} 
-                  className="w-full bg-pink-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md transition-all active:scale-[0.98]"
-                >
-                {isGeneratingImage ? <Loader2 className="animate-spin" size={20} /> : <Palette size={20} />} 
-                {isGeneratingImage ? 'Pintando Pixels...' : 'Gerar Imagem'}
-              </button>
-            </div>
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-5 sm:p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
             
-            {generatedImage && (
-              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                <div className="w-full rounded-2xl overflow-hidden border-2 border-slate-200 bg-slate-100 relative shadow-inner">
-                  <img src={generatedImage} alt="Arte gerada pela IA" className="w-full h-auto max-h-[400px] object-contain bg-black" />
-                </div>
+            {/* Abas Superiores (Gerar vs Editar) */}
+            <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 mb-2">
+              <button onClick={() => setVisualTab('generate')} className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${visualTab === 'generate' ? 'bg-pink-600 text-white shadow-sm' : 'text-slate-500'}`}>Gerar</button>
+              <button onClick={() => setVisualTab('edit')} className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${visualTab === 'edit' ? 'bg-pink-600 text-white shadow-sm' : 'text-slate-500'}`}>Editar</button>
+            </div>
+
+            {/* SEÇÃO: GERAR IMAGEM */}
+            {visualTab === 'generate' && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-left-4 duration-300">
+                <label className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                  <Palette size={18} className="text-pink-600" /> Crie do Zero (Grátis)
+                </label>
+                <textarea 
+                    value={imagePrompt} 
+                    onChange={(e) => setImagePrompt(e.target.value)} 
+                    placeholder="Ex: A futuristic city floating in the clouds, cyberpunk style..." 
+                    className="w-full h-28 p-4 bg-slate-50 border border-slate-300 rounded-xl text-sm outline-none focus:border-pink-500 resize-none" 
+                />
                 <button 
-                  onClick={downloadGeneratedImage} 
-                  className="w-full bg-slate-900 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md hover:bg-slate-800 transition-colors"
-                >
-                  <DownloadCloud size={20} /> Salvar no Aparelho
+                    onClick={handleGenerateImage} 
+                    disabled={isGeneratingImage} 
+                    className="w-full bg-pink-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md transition-all active:scale-[0.98]"
+                  >
+                  {isGeneratingImage ? <Loader2 className="animate-spin" size={20} /> : <Palette size={20} />} 
+                  {isGeneratingImage ? 'Pintando Pixels...' : 'Gerar Imagem'}
                 </button>
+
+                {generatedImage && (
+                  <div className="space-y-3 pt-2">
+                    <div className="w-full rounded-2xl overflow-hidden border-2 border-slate-200 bg-slate-100 relative">
+                      <img src={generatedImage} alt="Gerada" className="w-full h-auto max-h-[350px] object-contain bg-black" />
+                    </div>
+                    <button onClick={() => downloadVisualImage(generatedImage)} className="w-full bg-slate-900 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md">
+                      <DownloadCloud size={20} /> Salvar
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* SEÇÃO: EDITAR IMAGEM (Hugging Face) */}
+            {visualTab === 'edit' && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-right-4 duration-300">
+                <div className="bg-pink-50 p-4 rounded-xl border border-pink-100 space-y-3">
+                  <label className="text-xs font-bold text-pink-800 uppercase flex items-center gap-1"><Key size={14}/> Chave API Hugging Face</label>
+                  <input 
+                    type="password" 
+                    placeholder="Cole sua chave hf_... aqui" 
+                    value={hfKey} 
+                    onChange={(e) => setHfKey(e.target.value)} 
+                    className="w-full text-sm bg-white border border-pink-200 px-4 py-3 rounded-xl outline-none focus:border-pink-500" 
+                  />
+                  <p className="text-[10px] text-pink-600/80 font-bold">Obrigatório para edição. Crie grátis em huggingface.co</p>
+                </div>
+
+                <div 
+                  onClick={() => editImageInputRef.current?.click()} 
+                  className={`border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center cursor-pointer transition-all ${editSourceImage ? 'border-pink-500 bg-pink-50/30' : 'border-slate-300 hover:bg-slate-50'}`}
+                >
+                  {editSourceImage ? (
+                    <img src={URL.createObjectURL(editSourceImage)} className="h-32 object-contain rounded-lg shadow-sm" />
+                  ) : (
+                    <>
+                      <ImagePlus size={32} className="text-slate-400 mb-2" />
+                      <span className="text-sm font-bold text-slate-600">Toque para selecionar imagem</span>
+                    </>
+                  )}
+                  <input ref={editImageInputRef} type="file" className="hidden" accept="image/*" onChange={handleEditImageSource} />
+                </div>
+
+                <input 
+                  type="text" 
+                  value={editPrompt} 
+                  onChange={(e) => setEditPrompt(e.target.value)}
+                  placeholder="Comando (Ex: Make it look like a pencil sketch)" 
+                  className="w-full text-sm bg-slate-50 border border-slate-300 px-4 py-4 rounded-xl outline-none focus:border-pink-500 font-medium"
+                />
+
+                <button 
+                  onClick={handleEditCommand} 
+                  disabled={isEditingImage || !editSourceImage} 
+                  className="w-full bg-slate-900 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md disabled:opacity-50"
+                >
+                  {isEditingImage ? <Loader2 className="animate-spin" size={20} /> : <Paintbrush size={20} />} 
+                  {isEditingImage ? 'Aplicando Filtro IA...' : 'Editar Imagem'}
+                </button>
+
+                {editedImage && (
+                  <div className="space-y-3 pt-2">
+                    <div className="w-full rounded-2xl overflow-hidden border-2 border-pink-200 bg-slate-100 relative">
+                      <img src={editedImage} alt="Editada" className="w-full h-auto max-h-[350px] object-contain bg-black" />
+                    </div>
+                    <button onClick={() => downloadVisualImage(editedImage)} className="w-full bg-pink-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md">
+                      <DownloadCloud size={20} /> Salvar Edição
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
         )}
 
+        {/* ================= OUTRAS ABAS ================= */}
         {activeTab === 'image' && (
           <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-5 sm:p-6 space-y-6 text-center animate-in fade-in zoom-in-95 duration-200">
             <div onClick={() => imageInputRef.current?.click()} className="border-2 border-dashed border-slate-200 rounded-2xl p-10 sm:p-16 cursor-pointer hover:border-violet-400 hover:bg-violet-50/50 transition-all">
@@ -525,7 +640,6 @@ export default function App() {
             <span className="text-[10px] font-bold">IA Texto</span>
           </button>
 
-          {/* BOTÃO DA IA VISUAL NO MENU INFERIOR */}
           <button onClick={() => setActiveTab('visual-ai')} className={`flex flex-col items-center justify-center w-full h-full gap-1 transition-colors ${activeTab === 'visual-ai' ? 'text-pink-600' : 'text-slate-400 hover:text-slate-600'}`}>
             <Palette size={20} className={activeTab === 'visual-ai' ? 'fill-pink-100' : ''} />
             <span className="text-[10px] font-bold">IA Arte</span>
