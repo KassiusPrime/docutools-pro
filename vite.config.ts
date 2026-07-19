@@ -13,14 +13,13 @@ export default defineConfig({
         name: 'DocuTools Pro',
         short_name: 'DocuTools',
         description: 'A Ferramenta Definitiva para OCR, Imagens e IA.',
-        theme_color: '#2563eb',
+        theme_color: '#ffffff',
         background_color: '#f8fafc',
         display: 'standalone',
         orientation: 'portrait',
         icons: [
           {
-            // Ícone temporário em alta resolução direto da web para funcionar imediatamente
-            src: 'https://cdn-icons-png.flaticon.com/512/2911/2911230.png',
+            src: '/logo.png',
             sizes: '512x512',
             type: 'image/png',
             purpose: 'any maskable'
