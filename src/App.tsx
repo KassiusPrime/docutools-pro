@@ -64,6 +64,8 @@ export default function App() {
     'de': 'Alemão', 'it': 'Italiano', 'pt': 'Português'
   };
 
+  const PARAGRAPH_MARKER = "<<<PARAGRAPH_BREAK>>>";
+
   // Imagens Estados
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
   const [imageFormat, setImageFormat] = useState('pdf');
@@ -77,7 +79,9 @@ export default function App() {
   useEffect(() => { localStorage.setItem('docutools_hf_key', hfKey); }, [hfKey]);
 
   useEffect(() => {
-    if (activeTab === 'ai' && extractedText && !aiText) { setAiText(extractedText); }
+    if (activeTab === 'ai' && extractedText && !aiText) { 
+      setAiText(extractedText); 
+    }
   }, [activeTab, extractedText]);
 
   const copyToClipboard = async (text: string, type: 'extract' | 'ai') => {
@@ -95,7 +99,11 @@ export default function App() {
 
   const downloadDocx = async (textToSave: string, prefix: string) => {
     if (!textToSave) return;
-    const doc = new Document({ sections: [{ children: textToSave.split('\n').map((line) => new Paragraph({ children: [new TextRun(line)] })) }] });
+    const doc = new Document({ 
+      sections: [{ 
+        children: textToSave.split('\n').map((line) => new Paragraph({ children: [new TextRun(line)] })) 
+      }] 
+    });
     const blob = await Packer.toBlob(doc);
     saveAs(blob, `DocuTools_${prefix}.docx`);
   };
@@ -110,7 +118,10 @@ export default function App() {
     const lines = pdf.splitTextToSize(textToSave, pageWidth - margin * 2);
     let cursorY = margin;
     for (let i = 0; i < lines.length; i++) {
-      if (cursorY > pdf.internal.pageSize.getHeight() - margin) { pdf.addPage(); cursorY = margin; }
+      if (cursorY > pdf.internal.pageSize.getHeight() - margin) { 
+        pdf.addPage(); 
+        cursorY = margin; 
+      }
       pdf.text(lines[i], margin, cursorY);
       cursorY += 6;
     }
@@ -126,22 +137,50 @@ export default function App() {
     try {
       const text = await extractTextFromFile(file, (p) => setProgress(p));
       setExtractedText(text);
-    } catch (error) { alert('Erro ao processar arquivo.'); }
-    finally { setIsProcessing(false); }
+    } catch (error) { 
+      alert('Erro ao processar arquivo.'); 
+      console.error(error);
+    } finally { 
+      setIsProcessing(false); 
+    }
   };
 
   const handleAiAction = async () => {
-    const textToProcess = aiText || extractedText;
-    if (!textToProcess.trim()) { alert("Digite ou extraia um texto primeiro."); return; }
+    let textToProcess = aiText || extractedText;
+    if (!textToProcess.trim()) { 
+      alert("Digite ou extraia um texto primeiro."); 
+      return; 
+    }
     
     setIsAiWorking(true);
 
     try {
+      // Proteção de parágrafos
+      const protectedText = textToProcess
+        .split("\n")
+        .join(` ${PARAGRAPH_MARKER} `);
+
       if (translationEngine === 'google') {
-        const res = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(textToProcess)}`);
-        const data = await res.json();
-        const translated = data[0].map((item: any) => item[0]).join('');
-        setAiText(translated);
+        const paragraphs = textToProcess.split("\n");
+
+        const translatedParagraphs = await Promise.all(
+          paragraphs.map(async (paragraph) => {
+            if (!paragraph.trim()) return "";
+
+            const res = await fetch(
+              `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=\( {targetLang}&dt=t&q= \){encodeURIComponent(paragraph)}`
+            );
+
+            const data = await res.json();
+            console.log('Google Translate response:', data);
+
+            return data[0]
+              .map((item: any) => item[0])
+              .join("");
+          })
+        );
+
+        setAiText(translatedParagraphs.join("\n"));
         setIsAiWorking(false);
         return;
       }
@@ -152,50 +191,113 @@ export default function App() {
         return; 
       }
 
+      // Prompts aprimorados com instruções de preservação
       let systemPrompt = "";
-      if (aiAction === 'translate') systemPrompt = `Traduza para ${languageMap[targetLang]}. Mantenha a formatação original. Retorne APENAS a tradução.`;
-      else if (aiAction === 'summarize') systemPrompt = "Resuma o texto mantendo os pontos principais. Retorne apenas o resumo.";
-      else if (aiAction === 'grammar') systemPrompt = "Corrija a gramática e ortografia. Retorne APENAS o texto corrigido.";
-      else if (aiAction === 'improve') systemPrompt = "Melhore a fluidez e o vocabulário. Retorne APENAS o texto reescrito.";
+      if (aiAction === 'translate') {
+        systemPrompt = `
+Traduza para ${languageMap[targetLang]}.
+
+REGRAS:
+- Preserve exatamente todos os marcadores ${PARAGRAPH_MARKER}
+- Não remova marcadores
+- Não adicione marcadores
+- Não altere a ordem dos parágrafos
+- Retorne apenas a tradução, nada mais
+`;
+      } else if (aiAction === 'summarize') {
+        systemPrompt = `
+Resuma o texto mantendo os pontos principais.
+
+REGRAS:
+- Preserve exatamente todos os marcadores ${PARAGRAPH_MARKER}
+- Não remova marcadores
+- Não adicione marcadores
+- Retorne apenas o resumo
+`;
+      } else if (aiAction === 'grammar') {
+        systemPrompt = `
+Corrija a gramática, ortografia e pontuação.
+
+REGRAS:
+- Preserve exatamente todos os marcadores ${PARAGRAPH_MARKER}
+- Não remova marcadores
+- Não adicione marcadores
+- Retorne APENAS o texto corrigido
+`;
+      } else if (aiAction === 'improve') {
+        systemPrompt = `
+Melhore a fluidez, clareza e vocabulário mantendo o significado original.
+
+REGRAS:
+- Preserve exatamente todos os marcadores ${PARAGRAPH_MARKER}
+- Não remova marcadores
+- Não adicione marcadores
+- Retorne APENAS o texto reescrito
+`;
+      }
 
       if (translationEngine === 'gemini') {
-        // Corrigido para a versão mais recente do modelo Flash
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`, {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{ parts: [{ text: `${systemPrompt}\n\nTexto original:\n${textToProcess}` }] }]
+            contents: [{ 
+              parts: [{ 
+                text: `\( {systemPrompt}\n\nTexto original:\n \){protectedText}` 
+              }] 
+            }]
           })
         });
+        
         const data = await response.json();
-        if (data.error) throw new Error(data.error.message);
-        setAiText(data.candidates[0].content.parts[0].text);
-      } 
-      else {
-        // Lógica para Groq e OpenAI (Atualizado para gpt-4o-mini)
+        console.log('Gemini response:', data);
+
+        const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+        if (!content) {
+          console.error(data);
+          throw new Error("Resposta inválida do Gemini.");
+        }
+
+        setAiText(content.replaceAll(PARAGRAPH_MARKER, "\n"));
+      } else {
+        // Groq ou OpenAI
         const isGroq = translationEngine === 'groq';
         const url = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
         const model = isGroq ? 'llama3-8b-8192' : 'gpt-4o-mini';
 
         const response = await fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+          headers: { 
+            'Content-Type': 'application/json', 
+            'Authorization': `Bearer ${apiKey}` 
+          },
           body: JSON.stringify({
             model: model,
             messages: [
               { role: 'system', content: systemPrompt },
-              { role: 'user', content: textToProcess }
+              { role: 'user', content: protectedText }
             ],
             temperature: 0.3
           })
         });
+        
         const data = await response.json();
-        if (data.error) throw new Error(data.error.message);
-        setAiText(data.choices[0].message.content);
+        console.log('OpenAI/Groq response:', data);
+
+        const content = data?.choices?.[0]?.message?.content;
+
+        if (!content) {
+          console.error(data);
+          throw new Error("Resposta inválida.");
+        }
+
+        setAiText(content.replaceAll(PARAGRAPH_MARKER, "\n"));
       }
 
     } catch (error: any) {
-      alert(`Erro no processamento: ${error.message}`);
+      console.error(error);
+      alert(`Erro no processamento: ${error?.message || "Erro desconhecido"}`);
     } finally {
       setIsAiWorking(false);
     }
@@ -210,7 +312,7 @@ export default function App() {
     setGeneratedImage('');
     
     const seed = Math.floor(Math.random() * 1000000);
-    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt)}?nologo=true&seed=${seed}`;
+    const url = `https://image.pollinations.ai/prompt/\( {encodeURIComponent(imagePrompt)}?nologo=true&seed= \){seed}`;
     
     const img = new Image();
     img.src = url;
@@ -258,11 +360,15 @@ export default function App() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        if (errorData.error && errorData.error.includes("is currently loading")) {
-           throw new Error("O modelo da IA está inicializando. Aguarde 20 segundos e tente de novo!");
+        const text = await response.text();
+        console.log('Hugging Face error:', text);
+        let errorData;
+        try { errorData = JSON.parse(text); } catch {}
+        
+        if (errorData?.error?.includes("is currently loading")) {
+           throw new Error("O modelo da IA está inicializando. Aguarde 20-30 segundos e tente novamente!");
         }
-        throw new Error(errorData.error || 'Falha na comunicação com a API.');
+        throw new Error(errorData?.error || text || 'Falha na comunicação com a API.');
       }
 
       const blob = await response.blob();
@@ -280,7 +386,10 @@ export default function App() {
       const response = await fetch(url);
       const blob = await response.blob();
       saveAs(blob, `DocuTools_IA_${Date.now()}.jpg`);
-    } catch (error) { alert("Erro ao salvar."); }
+    } catch (error) { 
+      alert("Erro ao salvar."); 
+      console.error(error);
+    }
   };
 
   // ===================== FIM IA VISUAL =====================
@@ -293,7 +402,8 @@ export default function App() {
 
   const processImages = async () => {
     if (selectedImages.length === 0) return;
-    setIsProcessing(true); setProgress(0);
+    setIsProcessing(true); 
+    setProgress(0);
     try {
       if (imageFormat === 'pdf') {
         const pdf = new jsPDF();
@@ -301,54 +411,86 @@ export default function App() {
           const file = selectedImages[i];
           const isPng = file.type === 'image/png';
           const dataUrl = await new Promise<string>((res) => {
-            const r = new FileReader(); r.onload = (e) => res(e.target?.result as string); r.readAsDataURL(file);
+            const r = new FileReader(); 
+            r.onload = (e) => res(e.target?.result as string); 
+            r.readAsDataURL(file);
           });
+          
           let finalDataUrl = dataUrl;
           let format: 'PNG' | 'JPEG' = isPng ? 'PNG' : 'JPEG';
+          
           if (isPng) {
-            const img = new Image(); img.src = dataUrl;
+            const img = new Image(); 
+            img.src = dataUrl;
             await new Promise((resolve) => { img.onload = resolve; });
             const canvas = document.createElement('canvas');
-            canvas.width = img.width; canvas.height = img.height;
+            canvas.width = img.width; 
+            canvas.height = img.height;
             const ctx = canvas.getContext('2d')!;
-            ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.drawImage(img, 0, 0);
-            finalDataUrl = canvas.toDataURL('image/jpeg', 0.95); format = 'JPEG';
+            ctx.fillStyle = '#ffffff'; 
+            ctx.fillRect(0, 0, canvas.width, canvas.height); 
+            ctx.drawImage(img, 0, 0);
+            finalDataUrl = canvas.toDataURL('image/jpeg', 0.95); 
+            format = 'JPEG';
           }
+          
           const props = pdf.getImageProperties(finalDataUrl);
           const pageWidth = pdf.internal.pageSize.getWidth();
           const pageHeight = (props.height * pageWidth) / props.width;
+          
           if (i > 0) pdf.addPage();
           pdf.addImage(finalDataUrl, format, 0, 0, pageWidth, pageHeight);
           setProgress(Math.round(((i + 1) / selectedImages.length) * 100));
         }
         pdf.save('DocuTools_Imagens.pdf');
       } else {
+        // Lógica para JPEG/PNG individual
         for (let i = 0; i < selectedImages.length; i++) {
           const file = selectedImages[i];
           const objectUrl = URL.createObjectURL(file);
-          const img = new window.Image(); img.src = objectUrl;
+          const img = new window.Image(); 
+          img.src = objectUrl;
           await new Promise((res) => { img.onload = res; });
+          
           const canvas = document.createElement('canvas');
-          canvas.width = img.width; canvas.height = img.height;
+          canvas.width = img.width; 
+          canvas.height = img.height;
           const ctx = canvas.getContext('2d')!;
-          if (imageFormat === 'jpeg') { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+          
+          if (imageFormat === 'jpeg') { 
+            ctx.fillStyle = '#ffffff'; 
+            ctx.fillRect(0, 0, canvas.width, canvas.height); 
+          }
           ctx.drawImage(img, 0, 0);
-          const blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, `image/${imageFormat}`, 0.95));
-          if (blob) saveAs(blob, `DocuTools_Converted_${i + 1}.${imageFormat}`);
+          
+          const blob = await new Promise<Blob | null>((res) => 
+            canvas.toBlob(res, `image/${imageFormat}`, 0.95)
+          );
+          
+          if (blob) saveAs(blob, `DocuTools_Converted_\( {i + 1}. \){imageFormat}`);
           URL.revokeObjectURL(objectUrl);
           setProgress(Math.round(((i + 1) / selectedImages.length) * 100));
         }
       }
-    } catch (err) { alert('Erro ao processar imagens.'); }
-    finally { setIsProcessing(false); setProgress(0); }
+    } catch (err) { 
+      alert('Erro ao processar imagens.'); 
+      console.error(err);
+    } finally { 
+      setIsProcessing(false); 
+      setProgress(0); 
+    }
   };
 
   const speak = () => {
     const textToSpeak = aiText || extractedText;
-    if (!textToSpeak.trim()) { alert("Nenhum texto para ler."); return; }
+    if (!textToSpeak.trim()) { 
+      alert("Nenhum texto para ler."); 
+      return; 
+    }
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
-    utterance.lang = ttsLang; utterance.rate = ttsRate;
+    utterance.lang = ttsLang; 
+    utterance.rate = ttsRate;
     window.speechSynthesis.speak(utterance);
   };
 
@@ -403,7 +545,11 @@ export default function App() {
                   <span className="font-bold text-slate-700 text-sm truncate max-w-[200px]">{fileName}</span>
                   <button onClick={() => {setExtractedText(''); setFileName('');}} className="text-red-600 font-bold text-sm bg-red-50 px-3 py-1.5 rounded-lg">Limpar</button>
                 </div>
-                <textarea value={extractedText} onChange={(e) => setExtractedText(e.target.value)} className="w-full h-80 p-4 border border-slate-200 rounded-2xl text-sm font-medium outline-none focus:border-blue-500 transition-all" />
+                <textarea 
+                  value={extractedText} 
+                  onChange={(e) => setExtractedText(e.target.value)} 
+                  className="w-full h-80 p-4 border border-slate-200 rounded-2xl text-sm font-medium outline-none focus:border-blue-500 transition-all" 
+                />
                 <div className="grid grid-cols-3 gap-2 sm:gap-3">
                   <button onClick={() => downloadTxt(extractedText, 'Extraido')} className="bg-slate-100 py-3 rounded-xl font-bold border text-xs sm:text-sm">TXT</button>
                   <button onClick={() => downloadPdfText(extractedText, 'Extraido')} className="bg-slate-900 text-white py-3 rounded-xl font-bold text-xs sm:text-sm">PDF</button>
@@ -428,15 +574,21 @@ export default function App() {
                 className="w-full bg-white border border-slate-300 rounded-xl px-4 py-3 font-bold text-slate-700 outline-none focus:border-indigo-500 shadow-sm"
               >
                 <option value="google">Google Tradutor (Grátis - Sem chave)</option>
-                <option value="gemini">Google Gemini 1.5 (API Gratuita)</option>
+                <option value="gemini">Google Gemini 1.5 Flash (API Gratuita)</option>
                 <option value="groq">Groq / Llama 3 (API Gratuita - Rápido)</option>
-                <option value="openai">OpenAI / ChatGPT (API Paga)</option>
+                <option value="openai">OpenAI / GPT-4o-mini (API Paga)</option>
               </select>
 
               {translationEngine !== 'google' && (
                 <div className="space-y-1">
                   <label className="text-xs font-bold text-slate-500 uppercase">Sua Chave API</label>
-                  <input type="password" placeholder={`Insira a chave do ${translationEngine.toUpperCase()} aqui...`} value={apiKey} onChange={(e) => setApiKey(e.target.value)} className="w-full text-sm bg-white border border-slate-300 px-4 py-3 rounded-xl outline-none focus:border-indigo-500 shadow-sm" />
+                  <input 
+                    type="password" 
+                    placeholder={`Insira a chave do ${translationEngine.toUpperCase()} aqui...`} 
+                    value={apiKey} 
+                    onChange={(e) => setApiKey(e.target.value)} 
+                    className="w-full text-sm bg-white border border-slate-300 px-4 py-3 rounded-xl outline-none focus:border-indigo-500 shadow-sm" 
+                  />
                 </div>
               )}
             </div>
@@ -457,11 +609,26 @@ export default function App() {
             )}
 
             <div className="flex flex-col space-y-4">
-              <textarea value={aiText || extractedText} onChange={(e) => setAiText(e.target.value)} placeholder="Texto original..." className="w-full h-48 p-4 bg-slate-50 border rounded-xl text-sm outline-none focus:border-indigo-500" />
-              <button onClick={handleAiAction} disabled={isAiWorking} className="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md">
-                {isAiWorking ? <Loader2 className="animate-spin" /> : <Wand2 />} {isAiWorking ? 'Processando...' : 'Executar Ação'}
+              <textarea 
+                value={aiText} 
+                onChange={(e) => setAiText(e.target.value)} 
+                placeholder="Texto original (ou extraído do OCR)..." 
+                className="w-full h-48 p-4 bg-slate-50 border rounded-xl text-sm outline-none focus:border-indigo-500" 
+              />
+              <button 
+                onClick={handleAiAction} 
+                disabled={isAiWorking} 
+                className="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md"
+              >
+                {isAiWorking ? <Loader2 className="animate-spin" /> : <Wand2 />} 
+                {isAiWorking ? 'Processando...' : 'Executar Ação'}
               </button>
-              <textarea value={aiText} readOnly placeholder="Resultado..." className="w-full h-48 p-4 bg-indigo-50/30 border border-indigo-100 rounded-xl text-sm outline-none" />
+              <textarea 
+                value={aiText} 
+                readOnly 
+                placeholder="Resultado da IA..." 
+                className="w-full h-48 p-4 bg-indigo-50/30 border border-indigo-100 rounded-xl text-sm outline-none" 
+              />
             </div>
           </div>
         )}
@@ -583,7 +750,11 @@ export default function App() {
             {selectedImages.length > 0 && (
               <div className="space-y-4">
                 <div className="grid grid-cols-4 gap-2">
-                  {selectedImages.map((img, i) => <div key={i} className="aspect-square bg-slate-100 rounded-lg overflow-hidden border"><img src={URL.createObjectURL(img)} className="w-full h-full object-cover" /></div>)}
+                  {selectedImages.map((img, i) => (
+                    <div key={i} className="aspect-square bg-slate-100 rounded-lg overflow-hidden border">
+                      <img src={URL.createObjectURL(img)} className="w-full h-full object-cover" />
+                    </div>
+                  ))}
                 </div>
                 <div className="flex flex-col gap-4 items-center">
                   <select value={imageFormat} onChange={(e) => setImageFormat(e.target.value)} className="w-full border p-3 rounded-xl font-bold bg-slate-50">
@@ -614,7 +785,12 @@ export default function App() {
                 <span className="text-sm font-bold">2x</span>
               </div>
             </div>
-            <textarea value={aiText || extractedText} onChange={(e) => setAiText(e.target.value)} className="w-full h-64 p-5 border rounded-2xl text-sm font-medium outline-none focus:border-orange-500 bg-slate-50" placeholder="Texto para leitura..." />
+            <textarea 
+              value={aiText || extractedText} 
+              onChange={(e) => setAiText(e.target.value)} 
+              className="w-full h-64 p-5 border rounded-2xl text-sm font-medium outline-none focus:border-orange-500 bg-slate-50" 
+              placeholder="Texto para leitura..." 
+            />
             <div className="flex gap-2 sm:gap-4">
               <button onClick={speak} className="flex-1 bg-orange-500 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md">
                 <Volume2 /> Play
