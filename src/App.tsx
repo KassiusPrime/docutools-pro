@@ -28,6 +28,7 @@ export default function App() {
   const [isAiWorking, setIsAiWorking] = useState(false);
   const [aiAction, setAiAction] = useState<AiActionType>('translate');
   const [copiedAi, setCopiedAi] = useState(false);
+  const [aiProgress, setAiProgress] = useState<{ done: number; total: number } | null>(null);
 
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
   const [imageFormat, setImageFormat] = useState('pdf');
@@ -92,27 +93,123 @@ export default function App() {
     finally { setIsProcessing(false); }
   };
 
+  // Marcador único usado para pedir à IA que preserve as quebras de
+  // parágrafo. Pedir isso com um token explícito (em vez de confiar que o
+  // modelo vai manter as quebras de linha "\n" sozinho) é bem mais
+  // confiável — modelos de chat tendem a "normalizar" texto solto e juntar
+  // tudo em um único parágrafo quando não há uma instrução explícita.
+  const PARAGRAPH_MARKER = '¶¶¶';
+  const MAX_CHUNK_CHARS = 3000;
+
+  const buildParagraphChunks = (text: string, maxChars = MAX_CHUNK_CHARS): string[] => {
+    const paragraphs = text.split('\n');
+    const chunks: string[] = [];
+    let current: string[] = [];
+    let currentLen = 0;
+
+    for (const paragraph of paragraphs) {
+      const addedLen = paragraph.length + PARAGRAPH_MARKER.length;
+      if (currentLen + addedLen > maxChars && current.length > 0) {
+        chunks.push(current.join(PARAGRAPH_MARKER));
+        current = [];
+        currentLen = 0;
+      }
+      current.push(paragraph);
+      currentLen += addedLen;
+    }
+    if (current.length > 0) chunks.push(current.join(PARAGRAPH_MARKER));
+
+    return chunks;
+  };
+
+  const callOpenAiWithRetry = async (
+    systemPrompt: string,
+    userContent: string,
+    maxAttempts = 3
+  ): Promise<string> => {
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+          body: JSON.stringify({
+            model: 'gpt-3.5-turbo',
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userContent }
+            ],
+            temperature: 0.3
+          })
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error.message);
+        const content = data.choices?.[0]?.message?.content;
+        if (!content) throw new Error('Resposta vazia da IA.');
+        return content;
+      } catch (err) {
+        lastError = err as Error;
+        if (attempt < maxAttempts - 1) {
+          await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
+        }
+      }
+    }
+    throw lastError ?? new Error('Falha desconhecida.');
+  };
+
   const handleAiAction = async () => {
     const textToProcess = aiText || extractedText;
     if (!textToProcess.trim()) { alert("Digite ou extraia um texto primeiro."); return; }
     if (!apiKey.trim()) { alert("Insira sua chave OpenAI (sk-...)."); return; }
+
+    let basePrompt = "";
+    if (aiAction === 'translate') basePrompt = `Traduza o texto do usuário para ${targetLang}.`;
+    else if (aiAction === 'summarize') basePrompt = "Resuma o texto do usuário mantendo os pontos principais.";
+    else if (aiAction === 'grammar') basePrompt = "Corrija a gramática e ortografia do texto do usuário.";
+    else if (aiAction === 'improve') basePrompt = "Melhore a fluidez e o vocabulário do texto do usuário.";
+
+    // Instrução explícita de preservação de formatação — é a parte que
+    // resolve o "texto vem tudo junto". O marcador ¶¶¶ delimita cada
+    // parágrafo original e a IA é instruída a nunca removê-lo, adicioná-lo
+    // ou traduzi-lo.
+    const systemPrompt =
+      `${basePrompt} O texto contém marcadores de parágrafo representados por "${PARAGRAPH_MARKER}". ` +
+      `Mantenha EXATAMENTE os marcadores "${PARAGRAPH_MARKER}" nas mesmas posições relativas, um por quebra de parágrafo original. ` +
+      `Não remova, não adicione e não traduza os marcadores. Não junte parágrafos diferentes em um só. ` +
+      `Responda APENAS com o texto processado, sem comentários adicionais.`;
+
+    const chunks = buildParagraphChunks(textToProcess);
     setIsAiWorking(true);
-    let systemPrompt = "";
-    if (aiAction === 'translate') systemPrompt = `Traduza para: ${targetLang}. Retorne apenas a tradução.`;
-    else if (aiAction === 'summarize') systemPrompt = "Resuma o texto mantendo os pontos principais.";
-    else if (aiAction === 'grammar') systemPrompt = "Corrija a gramática e ortografia. Retorne apenas o texto corrigido.";
-    else if (aiAction === 'improve') systemPrompt = "Melhore a fluidez e o vocabulário do texto.";
+    setAiProgress({ done: 0, total: chunks.length });
+
     try {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({ model: 'gpt-3.5-turbo', messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: textToProcess }], temperature: 0.3 })
-      });
-      const data = await response.json();
-      if (data.error) throw new Error(data.error.message);
-      setAiText(data.choices[0].message.content);
-    } catch (error: any) { alert(`Erro: ${error.message}`); }
-    finally { setIsAiWorking(false); }
+      const processedChunks: string[] = [];
+
+      for (let i = 0; i < chunks.length; i++) {
+        const marcadosOriginais = chunks[i].split(PARAGRAPH_MARKER).length;
+        const resultado = await callOpenAiWithRetry(systemPrompt, chunks[i]);
+
+        const partesResultado = resultado.split(PARAGRAPH_MARKER);
+        if (partesResultado.length === marcadosOriginais) {
+          // Contagem de parágrafos bateu: reconstrói com quebras de linha reais.
+          processedChunks.push(partesResultado.join('\n'));
+        } else {
+          // A IA alterou a quantidade de marcadores. Em vez de arriscar
+          // formatação errada, usamos a resposta como veio (ainda assim
+          // sem quebrar o restante da tradução) e avisamos no final.
+          processedChunks.push(resultado.replace(new RegExp(PARAGRAPH_MARKER, 'g'), '\n'));
+        }
+
+        setAiProgress({ done: i + 1, total: chunks.length });
+      }
+
+      setAiText(processedChunks.join('\n\n'));
+    } catch (error: any) {
+      alert(`Erro: ${error.message}`);
+    } finally {
+      setIsAiWorking(false);
+      setAiProgress(null);
+    }
   };
 
   // Estava sendo usada no JSX (onChange={handleImagesSelected}) mas não
@@ -303,6 +400,11 @@ export default function App() {
               <button onClick={handleAiAction} disabled={isAiWorking} className="sm:w-32 bg-indigo-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2">
                 {isAiWorking ? <Loader2 className="animate-spin" /> : <Wand2 />}
               </button>
+              {aiProgress && (
+                <p className="text-xs font-bold text-indigo-600 text-center sm:hidden">
+                  Processando bloco {aiProgress.done} de {aiProgress.total}...
+                </p>
+              )}
               <textarea value={aiText} readOnly placeholder="Resultado..." className="flex-1 h-64 p-4 bg-indigo-50/30 border border-indigo-100 rounded-xl text-sm outline-none" />
             </div>
             {aiText && (
