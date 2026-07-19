@@ -2,28 +2,27 @@ import React, { useState, useRef, useEffect } from 'react';
 import { 
   FileText, Image as ImageIcon, Volume2, Download, Trash2, Upload, 
   Loader2, FileDown, FilePlus, Languages, Key, RefreshCw, Copy, Check, 
-  Wand2, Settings2, Globe
+  Wand2, Settings2, Globe, Palette, DownloadCloud
 } from 'lucide-react';
 import { extractTextFromFile } from './lib/utils';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
 import { jsPDF } from 'jspdf';
 import { saveAs } from 'file-saver';
 
-type TabType = 'extract' | 'ai' | 'image' | 'audio';
+// Adicionada a nova aba 'visual-ai'
+type TabType = 'extract' | 'ai' | 'image' | 'audio' | 'visual-ai';
 type AiActionType = 'translate' | 'summarize' | 'grammar' | 'improve';
-type EngineType = 'openai' | 'google';
+type EngineType = 'google' | 'openai' | 'gemini' | 'groq';
 
 export default function App() {
-  // ================= ESTADOS DE TELA DE ABERTURA =================
   const [showSplash, setShowSplash] = useState(true);
   const [isFading, setIsFading] = useState(false);
 
-  // Efeito para esconder a tela de abertura após 2.5 segundos
   useEffect(() => {
     const timer = setTimeout(() => {
-      setIsFading(true); // Inicia a transição de opacidade
-      setTimeout(() => setShowSplash(false), 500); // Remove do DOM após o fade
-    }, 2000); // Tempo que a logo fica na tela
+      setIsFading(true);
+      setTimeout(() => setShowSplash(false), 500);
+    }, 2000);
     return () => clearTimeout(timer);
   }, []);
 
@@ -31,13 +30,13 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
 
-  // Estados - OCR & Extração
+  // OCR Estados
   const [extractedText, setExtractedText] = useState('');
   const [fileName, setFileName] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [copiedExtract, setCopiedExtract] = useState(false);
 
-  // Estados - IA e Tradução
+  // IA Textos Estados
   const [targetLang, setTargetLang] = useState('en'); 
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('docutools_apikey') || '');
   const [aiText, setAiText] = useState('');
@@ -46,17 +45,22 @@ export default function App() {
   const [translationEngine, setTranslationEngine] = useState<EngineType>('google');
   const [copiedAi, setCopiedAi] = useState(false);
 
+  // IA Visual Estados (Pollinations)
+  const [imagePrompt, setImagePrompt] = useState('');
+  const [generatedImage, setGeneratedImage] = useState('');
+  const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+
   const languageMap: Record<string, string> = {
     'en': 'Inglês', 'es': 'Espanhol', 'fr': 'Francês', 
     'de': 'Alemão', 'it': 'Italiano', 'pt': 'Português'
   };
 
-  // Estados - Imagens
+  // Imagens Estados
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
   const [imageFormat, setImageFormat] = useState('pdf');
   const imageInputRef = useRef<HTMLInputElement>(null);
 
-  // Estados - Áudio
+  // Áudio Estados
   const [ttsLang, setTtsLang] = useState('pt-BR');
   const [ttsRate, setTtsRate] = useState(1);
 
@@ -123,7 +127,7 @@ export default function App() {
     setIsAiWorking(true);
 
     try {
-      if (translationEngine === 'google' && aiAction === 'translate') {
+      if (translationEngine === 'google') {
         const res = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(textToProcess)}`);
         const data = await res.json();
         const translated = data[0].map((item: any) => item[0]).join('');
@@ -132,20 +136,40 @@ export default function App() {
         return;
       }
 
-      if (translationEngine === 'openai' || aiAction !== 'translate') {
-        if (!apiKey.trim()) { alert("Insira sua chave OpenAI (sk-...) para usar este motor."); setIsAiWorking(false); return; }
+      if (!apiKey.trim()) { 
+        alert("Insira sua Chave API para usar este motor."); 
+        setIsAiWorking(false); 
+        return; 
+      }
 
-        let systemPrompt = "";
-        if (aiAction === 'translate') systemPrompt = `Traduza para ${languageMap[targetLang]}. Mantenha a formatação original. Retorne APENAS a tradução.`;
-        else if (aiAction === 'summarize') systemPrompt = "Resuma o texto mantendo os pontos principais. Retorne apenas o resumo.";
-        else if (aiAction === 'grammar') systemPrompt = "Corrija a gramática e ortografia. Retorne APENAS o texto corrigido.";
-        else if (aiAction === 'improve') systemPrompt = "Melhore a fluidez e o vocabulário. Retorne APENAS o texto reescrito.";
+      let systemPrompt = "";
+      if (aiAction === 'translate') systemPrompt = `Traduza para ${languageMap[targetLang]}. Mantenha a formatação original. Retorne APENAS a tradução.`;
+      else if (aiAction === 'summarize') systemPrompt = "Resuma o texto mantendo os pontos principais. Retorne apenas o resumo.";
+      else if (aiAction === 'grammar') systemPrompt = "Corrija a gramática e ortografia. Retorne APENAS o texto corrigido.";
+      else if (aiAction === 'improve') systemPrompt = "Melhore a fluidez e o vocabulário. Retorne APENAS o texto reescrito.";
 
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      if (translationEngine === 'gemini') {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: `${systemPrompt}\n\nTexto original:\n${textToProcess}` }] }]
+          })
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error.message);
+        setAiText(data.candidates[0].content.parts[0].text);
+      } 
+      else {
+        const isGroq = translationEngine === 'groq';
+        const url = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
+        const model = isGroq ? 'llama3-8b-8192' : 'gpt-3.5-turbo';
+
+        const response = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
           body: JSON.stringify({
-            model: 'gpt-3.5-turbo',
+            model: model,
             messages: [
               { role: 'system', content: systemPrompt },
               { role: 'user', content: textToProcess }
@@ -157,10 +181,50 @@ export default function App() {
         if (data.error) throw new Error(data.error.message);
         setAiText(data.choices[0].message.content);
       }
+
     } catch (error: any) {
       alert(`Erro no processamento: ${error.message}`);
     } finally {
       setIsAiWorking(false);
+    }
+  };
+
+  // Função Geradora de Imagens com Pollinations
+  const handleGenerateImage = () => {
+    if (!imagePrompt.trim()) {
+      alert("Descreva a imagem que você deseja gerar.");
+      return;
+    }
+    
+    setIsGeneratingImage(true);
+    setGeneratedImage('');
+    
+    // Adiciona um fator aleatório (seed) para sempre gerar algo novo, mesmo com o mesmo texto
+    const seed = Math.floor(Math.random() * 1000000);
+    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt)}?nologo=true&seed=${seed}`;
+    
+    // Força o pré-carregamento invisível para só mostrar quando estiver pronta
+    const img = new Image();
+    img.src = url;
+    img.onload = () => {
+      setGeneratedImage(url);
+      setIsGeneratingImage(false);
+    };
+    img.onerror = () => {
+      alert("Ocorreu um erro ao gerar a imagem. Tente alterar algumas palavras.");
+      setIsGeneratingImage(false);
+    };
+  };
+
+  // Função para baixar a imagem gerada
+  const downloadGeneratedImage = async () => {
+    if (!generatedImage) return;
+    try {
+      const response = await fetch(generatedImage);
+      const blob = await response.blob();
+      saveAs(blob, `DocuTools_Arte_${Date.now()}.jpg`);
+    } catch (error) {
+      alert("Erro ao tentar salvar a imagem.");
     }
   };
 
@@ -205,7 +269,7 @@ export default function App() {
         for (let i = 0; i < selectedImages.length; i++) {
           const file = selectedImages[i];
           const objectUrl = URL.createObjectURL(file);
-          const img = new Image(); img.src = objectUrl;
+          const img = new window.Image(); img.src = objectUrl;
           await new Promise((res) => { img.onload = res; });
           const canvas = document.createElement('canvas');
           canvas.width = img.width; canvas.height = img.height;
@@ -234,7 +298,6 @@ export default function App() {
   return (
     <div className="min-h-[100dvh] bg-slate-50 text-slate-900 font-sans pb-24 relative overflow-x-hidden">
       
-      {/* TELA DE ABERTURA (SPLASH SCREEN) */}
       {showSplash && (
         <div className={`fixed inset-0 z-[100] flex flex-col items-center justify-center bg-blue-600 transition-opacity duration-500 ease-in-out ${isFading ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}>
           <div className="w-28 h-28 bg-white rounded-3xl flex items-center justify-center mb-6 shadow-2xl animate-bounce relative overflow-hidden">
@@ -246,7 +309,6 @@ export default function App() {
         </div>
       )}
 
-      {/* HEADER PRINCIPAL */}
       <header className="bg-white border-b border-slate-200 p-4 shadow-sm sticky top-0 z-10">
         <div className="max-w-5xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -261,7 +323,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* ÁREA PRINCIPAL DAS ABAS */}
       <main className="max-w-5xl mx-auto p-4 mt-2">
         {activeTab === 'extract' && (
           <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-5 sm:p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
@@ -299,13 +360,27 @@ export default function App() {
         {activeTab === 'ai' && (
           <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-5 sm:p-6 space-y-6 animate-in fade-in zoom-in-95 duration-200">
             <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-4">
-              <label className="text-sm font-bold text-slate-700 flex items-center gap-2"><Globe size={18}/> Motor de Processamento:</label>
-              <div className="flex bg-white p-1 rounded-lg border">
-                <button onClick={() => {setTranslationEngine('google'); setAiAction('translate');}} className={`flex-1 py-2 text-xs font-bold rounded-md ${translationEngine === 'google' ? 'bg-indigo-100 text-indigo-700' : 'text-slate-500'}`}>Google (Grátis)</button>
-                <button onClick={() => setTranslationEngine('openai')} className={`flex-1 py-2 text-xs font-bold rounded-md ${translationEngine === 'openai' ? 'bg-indigo-600 text-white' : 'text-slate-500'}`}>OpenAI (Avançado)</button>
-              </div>
-              {translationEngine === 'openai' && (
-                <input type="password" placeholder="Sua Chave API (sk-...)" value={apiKey} onChange={(e) => setApiKey(e.target.value)} className="w-full text-sm bg-white border px-3 py-3 rounded-lg outline-none focus:border-indigo-500" />
+              <label className="text-sm font-bold text-slate-700 flex items-center gap-2"><Globe size={18}/> Motor de Inteligência:</label>
+              
+              <select 
+                value={translationEngine} 
+                onChange={(e) => {
+                  setTranslationEngine(e.target.value as EngineType);
+                  if (e.target.value === 'google') setAiAction('translate');
+                }} 
+                className="w-full bg-white border border-slate-300 rounded-xl px-4 py-3 font-bold text-slate-700 outline-none focus:border-indigo-500 shadow-sm"
+              >
+                <option value="google">Google Tradutor (Grátis - Sem chave)</option>
+                <option value="gemini">Google Gemini 1.5 (API Gratuita)</option>
+                <option value="groq">Groq / Llama 3 (API Gratuita - Rápido)</option>
+                <option value="openai">OpenAI / ChatGPT (API Paga)</option>
+              </select>
+
+              {translationEngine !== 'google' && (
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-500 uppercase">Sua Chave API</label>
+                  <input type="password" placeholder={`Insira a chave do ${translationEngine.toUpperCase()} aqui...`} value={apiKey} onChange={(e) => setApiKey(e.target.value)} className="w-full text-sm bg-white border border-slate-300 px-4 py-3 rounded-xl outline-none focus:border-indigo-500 shadow-sm" />
+                </div>
               )}
             </div>
 
@@ -336,6 +411,48 @@ export default function App() {
               <div className="flex gap-2 justify-end border-t pt-4">
                 <button onClick={() => copyToClipboard(aiText, 'ai')} className="bg-slate-100 border px-3 py-2 rounded-lg font-bold text-xs flex items-center gap-1">
                   {copiedAi ? <Check size={14} className="text-green-600" /> : <Copy size={14} />} Copiar
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* NOVA ABA: IA VISUAL (GERADOR DE IMAGENS) */}
+        {activeTab === 'visual-ai' && (
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-5 sm:p-6 space-y-6 animate-in fade-in zoom-in-95 duration-200">
+            <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-4">
+               <label className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                 <Palette size={18} className="text-pink-600" /> Gerador de Imagens IA (Grátis)
+               </label>
+               <p className="text-xs text-slate-500 font-medium pb-2">Descreva a imagem em detalhes. Dica: Prompts em inglês geram resultados melhores.</p>
+               
+               <textarea 
+                  value={imagePrompt} 
+                  onChange={(e) => setImagePrompt(e.target.value)} 
+                  placeholder="Ex: A futuristic city floating in the clouds, cyberpunk style, neon lights, 4k..." 
+                  className="w-full h-32 p-4 bg-white border border-slate-300 rounded-xl text-sm outline-none focus:border-pink-500 shadow-sm resize-none" 
+               />
+               
+               <button 
+                  onClick={handleGenerateImage} 
+                  disabled={isGeneratingImage} 
+                  className="w-full bg-pink-600 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md transition-all active:scale-[0.98]"
+                >
+                {isGeneratingImage ? <Loader2 className="animate-spin" size={20} /> : <Palette size={20} />} 
+                {isGeneratingImage ? 'Pintando Pixels...' : 'Gerar Imagem'}
+              </button>
+            </div>
+            
+            {generatedImage && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
+                <div className="w-full rounded-2xl overflow-hidden border-2 border-slate-200 bg-slate-100 relative shadow-inner">
+                  <img src={generatedImage} alt="Arte gerada pela IA" className="w-full h-auto max-h-[400px] object-contain bg-black" />
+                </div>
+                <button 
+                  onClick={downloadGeneratedImage} 
+                  className="w-full bg-slate-900 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md hover:bg-slate-800 transition-colors"
+                >
+                  <DownloadCloud size={20} /> Salvar no Aparelho
                 </button>
               </div>
             )}
@@ -396,26 +513,31 @@ export default function App() {
         )}
       </main>
 
-      {/* BARRA DE NAVEGAÇÃO INFERIOR */}
-      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 pb-[env(safe-area-inset-bottom)] z-50">
-        <div className="flex justify-around items-center h-16 max-w-5xl mx-auto px-2">
+      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 pb-[env(safe-area-inset-bottom)] z-50 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+        <div className="flex justify-between items-center h-16 max-w-5xl mx-auto px-1 sm:px-4">
           <button onClick={() => setActiveTab('extract')} className={`flex flex-col items-center justify-center w-full h-full gap-1 transition-colors ${activeTab === 'extract' ? 'text-blue-600' : 'text-slate-400 hover:text-slate-600'}`}>
-            <FileText size={22} className={activeTab === 'extract' ? 'fill-blue-100' : ''} />
+            <FileText size={20} className={activeTab === 'extract' ? 'fill-blue-100' : ''} />
             <span className="text-[10px] font-bold">OCR</span>
           </button>
           
           <button onClick={() => setActiveTab('ai')} className={`flex flex-col items-center justify-center w-full h-full gap-1 transition-colors ${activeTab === 'ai' ? 'text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}>
-            <Wand2 size={22} className={activeTab === 'ai' ? 'fill-indigo-100' : ''} />
-            <span className="text-[10px] font-bold">IA</span>
+            <Wand2 size={20} className={activeTab === 'ai' ? 'fill-indigo-100' : ''} />
+            <span className="text-[10px] font-bold">IA Texto</span>
+          </button>
+
+          {/* BOTÃO DA IA VISUAL NO MENU INFERIOR */}
+          <button onClick={() => setActiveTab('visual-ai')} className={`flex flex-col items-center justify-center w-full h-full gap-1 transition-colors ${activeTab === 'visual-ai' ? 'text-pink-600' : 'text-slate-400 hover:text-slate-600'}`}>
+            <Palette size={20} className={activeTab === 'visual-ai' ? 'fill-pink-100' : ''} />
+            <span className="text-[10px] font-bold">IA Arte</span>
           </button>
 
           <button onClick={() => setActiveTab('image')} className={`flex flex-col items-center justify-center w-full h-full gap-1 transition-colors ${activeTab === 'image' ? 'text-violet-600' : 'text-slate-400 hover:text-slate-600'}`}>
-            <ImageIcon size={22} className={activeTab === 'image' ? 'fill-violet-100' : ''} />
-            <span className="text-[10px] font-bold">Imagens</span>
+            <ImageIcon size={20} className={activeTab === 'image' ? 'fill-violet-100' : ''} />
+            <span className="text-[10px] font-bold">Mídia</span>
           </button>
 
           <button onClick={() => setActiveTab('audio')} className={`flex flex-col items-center justify-center w-full h-full gap-1 transition-colors ${activeTab === 'audio' ? 'text-orange-500' : 'text-slate-400 hover:text-slate-600'}`}>
-            <Volume2 size={22} className={activeTab === 'audio' ? 'fill-orange-100' : ''} />
+            <Volume2 size={20} className={activeTab === 'audio' ? 'fill-orange-100' : ''} />
             <span className="text-[10px] font-bold">Voz</span>
           </button>
         </div>
