@@ -9,15 +9,23 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: 'autoUpdate',
+      injectRegister: 'auto',
+      includeAssets: ['logo.png'],
       manifest: {
         name: 'DocuTools Pro',
         short_name: 'DocuTools',
         description: 'A Ferramenta Definitiva para OCR, Imagens e IA.',
         theme_color: '#ffffff',
-        background_color: '#f8fafc',
+        background_color: '#ffffff',
         display: 'standalone',
         orientation: 'portrait',
         icons: [
+          {
+            src: '/logo.png',
+            sizes: '192x192',
+            type: 'image/png',
+            purpose: 'any maskable'
+          },
           {
             src: '/logo.png',
             sizes: '512x512',
