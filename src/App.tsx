@@ -60,7 +60,7 @@ export default function App() {
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
 
   // Estados do Editor de Imagens
-  const [hfKey, setHfKey] = useState(() => localStorage.getItem('docutools_hf_key') || '');
+  const [pollinationsKey, setPollinationsKey] = useState(() => localStorage.getItem('docutools_pollinations_key') || '');
   const [editSourceImage, setEditSourceImage] = useState<File | null>(null);
   const [editPrompt, setEditPrompt] = useState('');
   const [editedImage, setEditedImage] = useState('');
@@ -82,7 +82,7 @@ export default function App() {
   const [ttsRate, setTtsRate] = useState(1);
 
   useEffect(() => { localStorage.setItem('docutools_apikey', apiKey); }, [apiKey]);
-  useEffect(() => { localStorage.setItem('docutools_hf_key', hfKey); }, [hfKey]);
+  useEffect(() => { localStorage.setItem('docutools_pollinations_key', pollinationsKey); }, [pollinationsKey]);
 
   useEffect(() => {
     if (activeTab === 'ai' && extractedText && !aiText) { setAiText(extractedText); }
@@ -177,10 +177,14 @@ export default function App() {
   };
 
   const callGeminiOnce = async (systemPrompt: string, userContent: string): Promise<string> => {
-    // O Google aposentou toda a linha "Gemini 1.5" (gemini-1.5-flash-latest
-    // retorna 404 "not found for API version v1beta"). O modelo atual do
-    // plano gratuito é o gemini-2.5-flash.
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+    // Usamos o alias "gemini-flash-latest" (em vez de fixar uma versão como
+    // gemini-2.5-flash) porque o Google aposenta modelos com frequência —
+    // esse alias é atualizado automaticamente pelo próprio Google para
+    // sempre apontar para o Flash "atual", reduzindo a chance de quebrar
+    // de novo no futuro. Se mesmo assim der erro de modelo não encontrado,
+    // é sinal de que a conta/chave não tem acesso a esse alias — nesse
+    // caso, veja em ai.google.dev/gemini-api/docs/models qual nome usar.
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -364,7 +368,6 @@ export default function App() {
   };
 
   const handleEditCommand = async () => {
-    if (!hfKey.trim()) return alert("Insira a chave do Hugging Face nas configurações da aba.");
     if (!editSourceImage) return alert("Selecione uma imagem primeiro.");
     if (!editPrompt.trim()) return alert("Digite o comando (ex: Make it look like a painting).");
 
@@ -372,49 +375,54 @@ export default function App() {
     setEditedImage('');
 
     try {
-      const getBase64 = (file: File): Promise<string> => new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(file);
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = error => reject(error);
-      });
+      // Trocamos o Hugging Face (instruct-pix2pix não é mais servido por
+      // nenhum provedor no novo sistema de roteamento deles) pelo modelo
+      // "kontext" da Pollinations.ai — o mesmo serviço já usado na aba
+      // "Gerar", que faz edição de imagem guiada por texto. O endpoint
+      // /v1/images/edits aceita o arquivo direto (multipart), sem precisar
+      // converter para base64 nem hospedar a imagem em algum lugar antes.
+      const formData = new FormData();
+      formData.append('image', editSourceImage);
+      formData.append('prompt', editPrompt);
+      formData.append('model', 'kontext');
 
-      const base64Data = await getBase64(editSourceImage);
+      const headers: Record<string, string> = {};
+      if (pollinationsKey.trim()) {
+        headers['Authorization'] = `Bearer ${pollinationsKey.trim()}`;
+      }
 
-      // Formato corrigido conforme a documentação da Hugging Face: o
-      // input principal (imagem em base64) vai direto em "inputs", e
-      // parâmetros extras (como o prompt de edição) vão em "parameters".
-      // A versão anterior aninhava tudo dentro de "inputs", o que não
-      // corresponde ao contrato documentado da API e provavelmente
-      // fazia a requisição falhar ou ser ignorada.
-      // A Hugging Face desligou definitivamente o domínio antigo
-      // api-inference.huggingface.co (retorna 410/erro de conexão desde o
-      // fim de 2025). O substituto oficial é router.huggingface.co/hf-inference,
-      // mantendo o mesmo formato de payload.
-      const response = await fetch("https://router.huggingface.co/hf-inference/models/timbrooks/instruct-pix2pix", {
+      const response = await fetch("https://gen.pollinations.ai/v1/images/edits", {
         method: "POST",
-        headers: {
-          "Authorization": `Bearer ${hfKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          inputs: base64Data.split(',')[1],
-          parameters: {
-            prompt: editPrompt
-          }
-        }),
+        headers,
+        body: formData,
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        if (errorData.error && errorData.error.includes("is currently loading")) {
-          throw new Error("O modelo da IA está inicializando. Aguarde 20 segundos e tente de novo!");
-        }
-        throw new Error(errorData.error || 'Falha na comunicação com a API.');
+        const errorText = await response.text();
+        throw new Error(errorText || `A API respondeu com status ${response.status}`);
       }
 
-      const blob = await response.blob();
-      setEditedImage(URL.createObjectURL(blob));
+      const contentType = response.headers.get('content-type') || '';
+
+      if (contentType.includes('application/json')) {
+        // Segue a convenção da API de edição de imagens da OpenAI (que a
+        // Pollinations espelha nesse endpoint): { data: [{ url }] } ou
+        // { data: [{ b64_json }] }.
+        const data = await response.json();
+        const item = data?.data?.[0];
+        if (item?.url) {
+          setEditedImage(item.url);
+        } else if (item?.b64_json) {
+          setEditedImage(`data:image/png;base64,${item.b64_json}`);
+        } else {
+          throw new Error('Resposta da API em formato inesperado.');
+        }
+      } else {
+        // Alguns endpoints da Pollinations devolvem a imagem direto
+        // (mesmo padrão do image.pollinations.ai usado na aba "Gerar").
+        const blob = await response.blob();
+        setEditedImage(URL.createObjectURL(blob));
+      }
     } catch (error: any) {
       alert(`Erro na Edição: ${error.message}`);
     } finally {
@@ -663,19 +671,19 @@ export default function App() {
               </div>
             )}
 
-            {/* SEÇÃO: EDITAR IMAGEM (Hugging Face) */}
+            {/* SEÇÃO: EDITAR IMAGEM (Pollinations.ai / kontext) */}
             {visualTab === 'edit' && (
               <div className="space-y-4 animate-in fade-in slide-in-from-right-4 duration-300">
                 <div className="bg-pink-50 p-4 rounded-xl border border-pink-100 space-y-3">
-                  <label className="text-xs font-bold text-pink-800 uppercase flex items-center gap-1"><Key size={14}/> Chave API Hugging Face</label>
+                  <label className="text-xs font-bold text-pink-800 uppercase flex items-center gap-1"><Key size={14}/> Chave API Pollinations (opcional)</label>
                   <input
                     type="password"
-                    placeholder="Cole sua chave hf_... aqui"
-                    value={hfKey}
-                    onChange={(e) => setHfKey(e.target.value)}
+                    placeholder="Cole sua chave aqui (opcional)"
+                    value={pollinationsKey}
+                    onChange={(e) => setPollinationsKey(e.target.value)}
                     className="w-full text-sm bg-white border border-pink-200 px-4 py-3 rounded-xl outline-none focus:border-pink-500"
                   />
-                  <p className="text-[10px] text-pink-600/80 font-bold">Obrigatório para edição. Crie grátis em huggingface.co</p>
+                  <p className="text-[10px] text-pink-600/80 font-bold">Funciona sem chave (uso limitado). Registre-se grátis em auth.pollinations.ai para limites maiores.</p>
                 </div>
 
                 <div
