@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  FileText, Image as ImageIcon, Volume2, Download, Trash2, Upload,
-  Loader2, FileDown, FilePlus, Languages, Key, RefreshCw, Copy, Check,
-  Wand2, Settings2, Globe, Palette, DownloadCloud, ImagePlus, Paintbrush
+  FileText, Image as ImageIcon, Volume2, Upload,
+  Loader2, FilePlus, Key, RefreshCw, Copy, Check,
+  Wand2, Globe, Palette, DownloadCloud, ImagePlus, Paintbrush, Mic
 } from 'lucide-react';
 import { extractTextFromFile } from './lib/utils';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
@@ -13,6 +13,7 @@ type TabType = 'extract' | 'ai' | 'image' | 'audio' | 'visual-ai';
 type AiActionType = 'translate' | 'summarize' | 'grammar' | 'improve';
 type EngineType = 'google' | 'openai' | 'gemini' | 'groq';
 type VisualTabType = 'generate' | 'edit';
+type AudioSubTabType = 'tts' | 'stt';
 
 // Marcador único usado para pedir aos motores de IA baseados em LLM
 // (Gemini/Groq/OpenAI) que preservem as quebras de parágrafo. Sem um
@@ -80,6 +81,15 @@ export default function App() {
   // Áudio Estados
   const [ttsLang, setTtsLang] = useState('pt-BR');
   const [ttsRate, setTtsRate] = useState(1);
+  const [audioSubTab, setAudioSubTab] = useState<AudioSubTabType>('tts');
+
+  // Voz -> Texto (transcrição 100% no navegador, via @huggingface/transformers)
+  const [sttFile, setSttFile] = useState<File | null>(null);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcribeStatus, setTranscribeStatus] = useState('');
+  const [transcribedText, setTranscribedText] = useState('');
+  const sttFileInputRef = useRef<HTMLInputElement>(null);
+  const transcriberRef = useRef<any>(null);
 
   useEffect(() => { localStorage.setItem('docutools_apikey', apiKey); }, [apiKey]);
   useEffect(() => { localStorage.setItem('docutools_pollinations_key', pollinationsKey); }, [pollinationsKey]);
@@ -201,7 +211,10 @@ export default function App() {
   const callChatCompletionOnce = async (systemPrompt: string, userContent: string): Promise<string> => {
     const isGroq = translationEngine === 'groq';
     const url = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
-    const model = isGroq ? 'llama3-8b-8192' : 'gpt-4o-mini';
+    // A Groq aposentou toda a linha de modelos Llama (anúncio de
+    // 17/06/2026). O substituto atual recomendado para uso geral rápido é
+    // o openai/gpt-oss-20b.
+    const model = isGroq ? 'openai/gpt-oss-20b' : 'gpt-4o-mini';
 
     const response = await fetch(url, {
       method: 'POST',
@@ -508,6 +521,108 @@ export default function App() {
     window.speechSynthesis.speak(utterance);
   };
 
+  // ===================== VOZ -> TEXTO (TRANSCRIÇÃO NO NAVEGADOR) =====================
+  // Roda um modelo Whisper (multilíngue, inclui português) inteiramente no
+  // navegador via WebAssembly, usando @huggingface/transformers. Sem
+  // servidor, sem chave de API — mas o modelo (~40-80MB) baixa na primeira
+  // vez, e a transcrição é mais lenta que num servidor com GPU,
+  // especialmente em celular.
+
+  const handleSttFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      setSttFile(e.target.files[0]);
+      setTranscribedText('');
+    }
+  };
+
+  // Downmix para mono: faz a média de todos os canais em vez de descartar
+  // canais extras, preservando melhor a qualidade do áudio original.
+  const averageChannels = (buffer: AudioBuffer): Float32Array => {
+    const { numberOfChannels, length } = buffer;
+    const result = new Float32Array(length);
+    for (let ch = 0; ch < numberOfChannels; ch++) {
+      const data = buffer.getChannelData(ch);
+      for (let i = 0; i < length; i++) {
+        result[i] += data[i] / numberOfChannels;
+      }
+    }
+    return result;
+  };
+
+  const getTranscriber = async () => {
+    if (transcriberRef.current) return transcriberRef.current;
+
+    setTranscribeStatus('Carregando biblioteca de transcrição...');
+    // Import dinâmico: só baixa essa biblioteca (pesada) quando a pessoa
+    // realmente usar a aba de transcrição, não no carregamento inicial do app.
+    const { pipeline } = await import('@huggingface/transformers');
+
+    transcriberRef.current = await pipeline(
+      'automatic-speech-recognition',
+      'Xenova/whisper-base',
+      {
+        progress_callback: (progress: any) => {
+          if (progress?.status === 'progress' && progress?.file) {
+            const pct = progress.progress ? Math.round(progress.progress) : 0;
+            setTranscribeStatus(`Baixando modelo (${progress.file})... ${pct}%`);
+          } else if (progress?.status === 'ready') {
+            setTranscribeStatus('Modelo pronto. Transcrevendo...');
+          }
+        }
+      }
+    );
+
+    return transcriberRef.current;
+  };
+
+  const handleTranscribeAudio = async () => {
+    if (!sttFile) { alert("Selecione um arquivo de áudio primeiro."); return; }
+
+    setIsTranscribing(true);
+    setTranscribedText('');
+    setTranscribeStatus('Preparando áudio...');
+
+    try {
+      const transcriber = await getTranscriber();
+
+      const arrayBuffer = await sttFile.arrayBuffer();
+      // O Whisper espera áudio mono a 16kHz — o AudioContext já resampleia
+      // automaticamente para a sampleRate configurada aqui.
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const audioContext = new AudioContextClass({ sampleRate: 16000 });
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      const audioData = audioBuffer.numberOfChannels > 1
+        ? averageChannels(audioBuffer)
+        : audioBuffer.getChannelData(0);
+
+      setTranscribeStatus('Transcrevendo áudio (pode demorar, dependendo do tamanho e do aparelho)...');
+
+      const result = await transcriber(audioData, {
+        chunk_length_s: 30,
+        stride_length_s: 5,
+        return_timestamps: false,
+      });
+
+      const text = Array.isArray(result)
+        ? result.map((r: any) => r.text).join(' ')
+        : result.text;
+
+      setTranscribedText((text || '').trim());
+      setTranscribeStatus('');
+    } catch (error: any) {
+      alert(`Erro na transcrição: ${error.message}`);
+      setTranscribeStatus('');
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
+
+  const sendTranscriptionToAiTab = () => {
+    if (!transcribedText.trim()) return;
+    setAiText(transcribedText);
+    setActiveTab('ai');
+  };
+
   return (
     <div className="min-h-[100dvh] bg-slate-50 text-slate-900 font-sans pb-24 relative overflow-x-hidden">
 
@@ -560,7 +675,11 @@ export default function App() {
                   <button onClick={() => {setExtractedText(''); setFileName('');}} className="text-red-600 font-bold text-sm bg-red-50 px-3 py-1.5 rounded-lg">Limpar</button>
                 </div>
                 <textarea value={extractedText} onChange={(e) => setExtractedText(e.target.value)} className="w-full h-80 p-4 border border-slate-200 rounded-2xl text-sm font-medium outline-none focus:border-blue-500 transition-all" />
-                <div className="grid grid-cols-3 gap-2 sm:gap-3">
+                <div className="grid grid-cols-4 gap-2 sm:gap-3">
+                  <button onClick={() => copyToClipboard(extractedText, 'extract')} className="bg-slate-100 py-3 rounded-xl font-bold border text-xs sm:text-sm flex items-center justify-center gap-1">
+                    {copiedExtract ? <Check size={14} className="text-green-600" /> : <Copy size={14} />}
+                    {copiedExtract ? 'Copiado!' : 'Copiar'}
+                  </button>
                   <button onClick={() => downloadTxt(extractedText, 'Extraido')} className="bg-slate-100 py-3 rounded-xl font-bold border text-xs sm:text-sm">TXT</button>
                   <button onClick={() => downloadPdfText(extractedText, 'Extraido')} className="bg-slate-900 text-white py-3 rounded-xl font-bold text-xs sm:text-sm">PDF</button>
                   <button onClick={() => downloadDocx(extractedText, 'Extraido')} className="bg-blue-600 text-white py-3 rounded-xl font-bold text-xs sm:text-sm">DOCX</button>
@@ -584,8 +703,8 @@ export default function App() {
                 className="w-full bg-white border border-slate-300 rounded-xl px-4 py-3 font-bold text-slate-700 outline-none focus:border-indigo-500 shadow-sm"
               >
                 <option value="google">Google Tradutor (Grátis - Sem chave)</option>
-                <option value="gemini">Google Gemini 1.5 (API Gratuita)</option>
-                <option value="groq">Groq / Llama 3 (API Gratuita - Rápido)</option>
+                <option value="gemini">Google Gemini (API Gratuita)</option>
+                <option value="groq">Groq / GPT-OSS 20B (API Gratuita - Rápido)</option>
                 <option value="openai">OpenAI / ChatGPT (API Paga)</option>
               </select>
 
@@ -623,6 +742,16 @@ export default function App() {
                 </p>
               )}
               <textarea value={aiText} readOnly placeholder="Resultado..." className="w-full h-48 p-4 bg-indigo-50/30 border border-indigo-100 rounded-xl text-sm outline-none" />
+              {aiText && (
+                <div className="grid grid-cols-3 gap-2">
+                  <button onClick={() => copyToClipboard(aiText, 'ai')} className="bg-slate-100 py-2.5 rounded-lg font-bold border text-xs sm:text-sm flex items-center justify-center gap-1">
+                    {copiedAi ? <Check size={14} className="text-green-600" /> : <Copy size={14} />}
+                    {copiedAi ? 'Copiado!' : 'Copiar'}
+                  </button>
+                  <button onClick={() => downloadTxt(aiText, 'IA')} className="bg-slate-900 text-white py-2.5 rounded-lg font-bold text-xs sm:text-sm">TXT</button>
+                  <button onClick={() => downloadDocx(aiText, 'IA')} className="bg-indigo-600 text-white py-2.5 rounded-lg font-bold text-xs sm:text-sm">DOCX</button>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -762,28 +891,94 @@ export default function App() {
         )}
 
         {activeTab === 'audio' && (
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-5 sm:p-6 space-y-6 animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex flex-col gap-4 bg-slate-50 p-4 rounded-xl border">
-              <label className="text-xs font-bold text-slate-500 uppercase">Configurações de Voz</label>
-              <select value={ttsLang} onChange={(e) => setTtsLang(e.target.value)} className="w-full border p-3 rounded-lg font-bold bg-white">
-                <option value="pt-BR">Português (BR)</option>
-                <option value="en-US">Inglês (EUA)</option>
-              </select>
-              <div className="flex items-center gap-3">
-                <span className="text-sm font-bold">1x</span>
-                <input type="range" min="0.5" max="2" step="0.1" value={ttsRate} onChange={(e) => setTtsRate(parseFloat(e.target.value))} className="flex-1 accent-orange-500" />
-                <span className="text-sm font-bold">2x</span>
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-5 sm:p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
+
+            {/* Abas Superiores (Texto->Voz vs Voz->Texto) */}
+            <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 mb-2">
+              <button onClick={() => setAudioSubTab('tts')} className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${audioSubTab === 'tts' ? 'bg-orange-500 text-white shadow-sm' : 'text-slate-500'}`}>Texto → Voz</button>
+              <button onClick={() => setAudioSubTab('stt')} className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${audioSubTab === 'stt' ? 'bg-orange-500 text-white shadow-sm' : 'text-slate-500'}`}>Voz → Texto</button>
+            </div>
+
+            {/* SEÇÃO: TEXTO -> VOZ (TTS, já existia) */}
+            {audioSubTab === 'tts' && (
+              <div className="space-y-6 animate-in fade-in slide-in-from-left-4 duration-300">
+                <div className="flex flex-col gap-4 bg-slate-50 p-4 rounded-xl border">
+                  <label className="text-xs font-bold text-slate-500 uppercase">Configurações de Voz</label>
+                  <select value={ttsLang} onChange={(e) => setTtsLang(e.target.value)} className="w-full border p-3 rounded-lg font-bold bg-white">
+                    <option value="pt-BR">Português (BR)</option>
+                    <option value="en-US">Inglês (EUA)</option>
+                  </select>
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm font-bold">1x</span>
+                    <input type="range" min="0.5" max="2" step="0.1" value={ttsRate} onChange={(e) => setTtsRate(parseFloat(e.target.value))} className="flex-1 accent-orange-500" />
+                    <span className="text-sm font-bold">2x</span>
+                  </div>
+                </div>
+                <textarea value={aiText || extractedText} onChange={(e) => setAiText(e.target.value)} className="w-full h-64 p-5 border rounded-2xl text-sm font-medium outline-none focus:border-orange-500 bg-slate-50" placeholder="Texto para leitura..." />
+                <div className="flex gap-2 sm:gap-4">
+                  <button onClick={speak} className="flex-1 bg-orange-500 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md">
+                    <Volume2 /> Play
+                  </button>
+                  <button onClick={() => window.speechSynthesis.cancel()} className="w-24 sm:w-40 bg-slate-900 text-white py-4 rounded-xl font-bold">
+                    Stop
+                  </button>
+                </div>
               </div>
-            </div>
-            <textarea value={aiText || extractedText} onChange={(e) => setAiText(e.target.value)} className="w-full h-64 p-5 border rounded-2xl text-sm font-medium outline-none focus:border-orange-500 bg-slate-50" placeholder="Texto para leitura..." />
-            <div className="flex gap-2 sm:gap-4">
-              <button onClick={speak} className="flex-1 bg-orange-500 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md">
-                <Volume2 /> Play
-              </button>
-              <button onClick={() => window.speechSynthesis.cancel()} className="w-24 sm:w-40 bg-slate-900 text-white py-4 rounded-xl font-bold">
-                Stop
-              </button>
-            </div>
+            )}
+
+            {/* SEÇÃO: VOZ -> TEXTO (transcrição no navegador, via Whisper/transformers.js) */}
+            {audioSubTab === 'stt' && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-right-4 duration-300">
+                <div className="bg-orange-50 p-4 rounded-xl border border-orange-100">
+                  <p className="text-xs font-bold text-orange-800">
+                    Transcrição 100% local, sem servidor e sem chave de API. Na primeira
+                    vez, um modelo (~40-80MB) é baixado e fica em cache no navegador.
+                    Pode demorar, principalmente em celular.
+                  </p>
+                </div>
+
+                <div
+                  onClick={() => sttFileInputRef.current?.click()}
+                  className={`border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center cursor-pointer transition-all ${sttFile ? 'border-orange-500 bg-orange-50/30' : 'border-slate-300 hover:bg-slate-50'}`}
+                >
+                  <Mic size={32} className="text-slate-400 mb-2" />
+                  <span className="text-sm font-bold text-slate-600">
+                    {sttFile ? sttFile.name : 'Toque para selecionar um áudio'}
+                  </span>
+                  <span className="text-xs text-slate-400 mt-1">MP3, WAV, M4A, OGG...</span>
+                  <input ref={sttFileInputRef} type="file" className="hidden" accept="audio/*" onChange={handleSttFileSelected} />
+                </div>
+
+                <button
+                  onClick={handleTranscribeAudio}
+                  disabled={isTranscribing || !sttFile}
+                  className="w-full bg-orange-500 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md disabled:opacity-50"
+                >
+                  {isTranscribing ? <Loader2 className="animate-spin" size={20} /> : <Mic size={20} />}
+                  {isTranscribing ? 'Transcrevendo...' : 'Transcrever Áudio'}
+                </button>
+
+                {transcribeStatus && (
+                  <p className="text-xs font-bold text-orange-600 text-center">{transcribeStatus}</p>
+                )}
+
+                {transcribedText && (
+                  <div className="space-y-3">
+                    <textarea
+                      value={transcribedText}
+                      onChange={(e) => setTranscribedText(e.target.value)}
+                      className="w-full h-48 p-4 bg-orange-50/30 border border-orange-100 rounded-xl text-sm outline-none"
+                    />
+                    <div className="grid grid-cols-2 gap-2 sm:gap-3">
+                      <button onClick={() => downloadTxt(transcribedText, 'Transcricao')} className="bg-slate-100 py-3 rounded-xl font-bold border text-xs sm:text-sm">Baixar TXT</button>
+                      <button onClick={sendTranscriptionToAiTab} className="bg-indigo-600 text-white py-3 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-1">
+                        <Wand2 size={14} /> Enviar para IA Texto
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </main>
