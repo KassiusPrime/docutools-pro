@@ -83,6 +83,13 @@ export default function App() {
   const [ttsRate, setTtsRate] = useState(1);
   const [audioSubTab, setAudioSubTab] = useState<AudioSubTabType>('tts');
 
+  // OmniRoute (opcional): se configurado, usa transcrição e TTS via
+  // servidor (mais rápido e com voz melhor). Se não, cai no modo local
+  // (Whisper no navegador / voz do sistema operacional).
+  const [omniRouteUrl, setOmniRouteUrl] = useState(() => localStorage.getItem('docutools_omniroute_url') || '');
+  const [omniRouteKey, setOmniRouteKey] = useState(() => localStorage.getItem('docutools_omniroute_key') || '');
+  const [isFetchingTts, setIsFetchingTts] = useState(false);
+
   // Voz -> Texto (transcrição 100% no navegador, via @huggingface/transformers)
   const [sttFile, setSttFile] = useState<File | null>(null);
   const [isTranscribing, setIsTranscribing] = useState(false);
@@ -93,6 +100,8 @@ export default function App() {
 
   useEffect(() => { localStorage.setItem('docutools_apikey', apiKey); }, [apiKey]);
   useEffect(() => { localStorage.setItem('docutools_pollinations_key', pollinationsKey); }, [pollinationsKey]);
+  useEffect(() => { localStorage.setItem('docutools_omniroute_url', omniRouteUrl); }, [omniRouteUrl]);
+  useEffect(() => { localStorage.setItem('docutools_omniroute_key', omniRouteKey); }, [omniRouteKey]);
 
   useEffect(() => {
     if (activeTab === 'ai' && extractedText && !aiText) { setAiText(extractedText); }
@@ -512,9 +521,51 @@ export default function App() {
     finally { setIsProcessing(false); setProgress(0); }
   };
 
-  const speak = () => {
+  const speak = async () => {
     const textToSpeak = aiText || extractedText;
     if (!textToSpeak.trim()) { alert("Nenhum texto para ler."); return; }
+
+    // Se o OmniRoute estiver configurado, usa voz neural de verdade
+    // (ElevenLabs/OpenAI/etc, via /v1/audio/speech) em vez da voz robótica
+    // padrão do sistema operacional.
+    if (omniRouteUrl.trim() && omniRouteKey.trim()) {
+      setIsFetchingTts(true);
+      try {
+        const response = await fetch(`${omniRouteUrl.replace(/\/$/, '')}/v1/audio/speech`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${omniRouteKey}`,
+          },
+          body: JSON.stringify({
+            input: textToSpeak,
+            // 'alloy' é uma voz padrão amplamente suportada (convenção da
+            // API de TTS da OpenAI, que o OmniRoute espelha). Troque pelo
+            // nome de voz do provedor que você configurou no dashboard do
+            // OmniRoute se quiser outra.
+            voice: 'alloy',
+          }),
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(errText || `OmniRoute respondeu ${response.status}`);
+        }
+
+        const blob = await response.blob();
+        const audio = new Audio(URL.createObjectURL(blob));
+        audio.playbackRate = ttsRate;
+        audio.play();
+        return;
+      } catch (error: any) {
+        console.error(error);
+        alert(`Falha ao usar voz do OmniRoute (${error.message}). Usando voz do navegador.`);
+        // segue para o fallback abaixo
+      } finally {
+        setIsFetchingTts(false);
+      }
+    }
+
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
     utterance.lang = ttsLang; utterance.rate = ttsRate;
@@ -575,6 +626,29 @@ export default function App() {
     return transcriberRef.current;
   };
 
+  // Transcreve via OmniRoute (servidor próprio, endpoint compatível com
+  // OpenAI /v1/audio/transcriptions). Muito mais rápido que rodar Whisper
+  // no navegador, e sem precisar baixar modelo nenhum no aparelho.
+  const transcribeWithOmniRoute = async (file: File): Promise<string> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('model', 'whisper-1');
+
+    const response = await fetch(`${omniRouteUrl.replace(/\/$/, '')}/v1/audio/transcriptions`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${omniRouteKey}` },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(errText || `OmniRoute respondeu ${response.status}`);
+    }
+
+    const data = await response.json();
+    return (data.text || '').trim();
+  };
+
   const handleTranscribeAudio = async () => {
     if (!sttFile) { alert("Selecione um arquivo de áudio primeiro."); return; }
 
@@ -582,6 +656,23 @@ export default function App() {
     setTranscribedText('');
     setTranscribeStatus('Preparando áudio...');
 
+    // Caminho 1: OmniRoute configurado -> transcrição no servidor (rápida,
+    // sem download de modelo). Se falhar, cai pro Whisper local.
+    if (omniRouteUrl.trim() && omniRouteKey.trim()) {
+      try {
+        setTranscribeStatus('Transcrevendo via OmniRoute...');
+        const text = await transcribeWithOmniRoute(sttFile);
+        setTranscribedText(text);
+        setTranscribeStatus('');
+        setIsTranscribing(false);
+        return;
+      } catch (error: any) {
+        console.error('OmniRoute falhou, caindo para transcrição local:', error);
+        setTranscribeStatus('OmniRoute falhou — usando transcrição local no navegador...');
+      }
+    }
+
+    // Caminho 2: Whisper local no navegador (mais lento, mas sempre funciona)
     try {
       const transcriber = await getTranscriber();
 
@@ -893,6 +984,34 @@ export default function App() {
         {activeTab === 'audio' && (
           <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-5 sm:p-6 space-y-5 animate-in fade-in zoom-in-95 duration-200">
 
+            {/* Configuração opcional do OmniRoute (servidor próprio) */}
+            <details className="bg-slate-50 rounded-xl border border-slate-200 p-4">
+              <summary className="text-xs font-bold text-slate-500 uppercase cursor-pointer">
+                ⚙️ Servidor próprio (OmniRoute) — opcional
+              </summary>
+              <div className="mt-3 space-y-2">
+                <p className="text-[11px] text-slate-500">
+                  Se você tem um OmniRoute rodando (ex: no seu Oracle Cloud), configure aqui
+                  para transcrição mais rápida e vozes de melhor qualidade. Sem isso, o app
+                  usa transcrição local no navegador e a voz padrão do sistema.
+                </p>
+                <input
+                  type="text"
+                  placeholder="https://api.seudominio.com"
+                  value={omniRouteUrl}
+                  onChange={(e) => setOmniRouteUrl(e.target.value)}
+                  className="w-full text-sm bg-white border border-slate-300 px-3 py-2 rounded-lg outline-none focus:border-orange-500"
+                />
+                <input
+                  type="password"
+                  placeholder="Chave de API do OmniRoute"
+                  value={omniRouteKey}
+                  onChange={(e) => setOmniRouteKey(e.target.value)}
+                  className="w-full text-sm bg-white border border-slate-300 px-3 py-2 rounded-lg outline-none focus:border-orange-500"
+                />
+              </div>
+            </details>
+
             {/* Abas Superiores (Texto->Voz vs Voz->Texto) */}
             <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 mb-2">
               <button onClick={() => setAudioSubTab('tts')} className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${audioSubTab === 'tts' ? 'bg-orange-500 text-white shadow-sm' : 'text-slate-500'}`}>Texto → Voz</button>
@@ -916,8 +1035,9 @@ export default function App() {
                 </div>
                 <textarea value={aiText || extractedText} onChange={(e) => setAiText(e.target.value)} className="w-full h-64 p-5 border rounded-2xl text-sm font-medium outline-none focus:border-orange-500 bg-slate-50" placeholder="Texto para leitura..." />
                 <div className="flex gap-2 sm:gap-4">
-                  <button onClick={speak} className="flex-1 bg-orange-500 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md">
-                    <Volume2 /> Play
+                  <button onClick={speak} disabled={isFetchingTts} className="flex-1 bg-orange-500 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 shadow-md disabled:opacity-60">
+                    {isFetchingTts ? <Loader2 className="animate-spin" size={20} /> : <Volume2 />}
+                    {isFetchingTts ? 'Gerando voz...' : 'Play'}
                   </button>
                   <button onClick={() => window.speechSynthesis.cancel()} className="w-24 sm:w-40 bg-slate-900 text-white py-4 rounded-xl font-bold">
                     Stop
