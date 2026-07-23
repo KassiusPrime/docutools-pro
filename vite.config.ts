@@ -5,9 +5,7 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
   optimizeDeps: {
-    exclude: [
-      '@huggingface/transformers'
-    ]
+    exclude: ['@huggingface/transformers']
   },
 
   worker: {
@@ -15,7 +13,15 @@ export default defineConfig({
   },
 
   build: {
-    target: 'esnext'
+    target: 'esnext',
+    rollupOptions: {
+      external: ['@huggingface/transformers'],
+      output: {
+        manualChunks: {
+          transformers: ['@huggingface/transformers']
+        }
+      }
+    }
   },
 
   plugins: [
@@ -25,16 +31,12 @@ export default defineConfig({
 
     VitePWA({
       registerType: 'autoUpdate',
-
       injectRegister: 'auto',
 
-      includeAssets: [
-        'logo.png'
-      ],
+      includeAssets: ['logo.png'],
 
       workbox: {
         cleanupOutdatedCaches: true,
-
         runtimeCaching: [
           {
             urlPattern: /^https:\/\/huggingface\.co\/.*/i,
@@ -42,18 +44,17 @@ export default defineConfig({
             options: {
               cacheName: 'hf-models',
               expiration: {
-                maxEntries: 20
+                maxEntries: 30
               }
             }
           },
-
           {
             urlPattern: /^https:\/\/cdn-lfs\.huggingface\.co\/.*/i,
             handler: 'CacheFirst',
             options: {
               cacheName: 'hf-lfs',
               expiration: {
-                maxEntries: 20
+                maxEntries: 30
               }
             }
           }
@@ -62,20 +63,12 @@ export default defineConfig({
 
       manifest: {
         name: 'DocuTools Pro',
-
         short_name: 'DocuTools',
-
-        description:
-          'OCR, IA, Transcrição de Áudio, Tradução, PDF e Conversão de Mídia',
-
+        description: 'OCR, IA, Transcrição de Áudio, Tradução, PDF e Conversão de Mídia',
         theme_color: '#ffffff',
-
         background_color: '#ffffff',
-
         display: 'standalone',
-
         orientation: 'portrait',
-
         icons: [
           {
             src: '/logo.png',
@@ -83,7 +76,6 @@ export default defineConfig({
             type: 'image/png',
             purpose: 'any maskable'
           },
-
           {
             src: '/logo.png',
             sizes: '512x512',
