@@ -9,7 +9,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.2.0",
     "@types/file-saver": "^2.0.7",
     "clsx": "2.1.1",
     "docx": "^9.7.1",
