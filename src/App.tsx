@@ -667,7 +667,7 @@ export default function App() {
                 <button onClick={() => setChatMessages([])} className="text-xs text-red-500 hover:text-red-600 flex items-center gap-1">
                   <Trash2 className="w-3 h-3" /> Limpar
                 </button>
-              )}
+              </div>
             </div>
 
             <div ref={chatContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -884,4 +884,42 @@ export default function App() {
               <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 space-y-4">
                 <textarea value={ttsText} onChange={(e) => setTtsText(e.target.value)} placeholder="Digite o texto para ser falado..." className="w-full h-32 text-sm bg-gray-50 rounded-xl p-4 border border-gray-200 focus:ring-2 focus:ring-emerald-500 outline-none resize-y" />
                 <button onClick={handleTTS} className={`w-full px-6 py-3 rounded-xl font-semibold flex items-center justify-center gap-2 ${isSpeaking ? 'bg-red-500 text-white' : 'bg-emerald-500 text-white'}`}>
-                  {isSpeaking ? <><StopCircle className="w-4 h-4" />Parar
+                  {isSpeaking ? <><StopCircle className="w-4 h-4" />Parar</> : <><Volume2 className="w-4 h-4" />Falar</>}
+                </button>
+              </div>
+            )}
+
+            {audioSubTab === 'stt' && (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 space-y-4">
+                <button onClick={handleSTT} className={`w-full px-6 py-8 rounded-2xl font-semibold flex flex-col items-center justify-center gap-3 transition-all ${isRecording ? 'bg-red-50 border-2 border-red-300 text-red-600' : 'bg-emerald-50 border-2 border-emerald-200 text-emerald-600 hover:border-emerald-300'}`}>
+                  <div className={`w-16 h-16 rounded-full flex items-center justify-center ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-emerald-500'}`}>
+                    <Mic className="w-8 h-8 text-white" />
+                  </div>
+                  {isRecording ? 'Gravando... Clique para parar' : 'Clique para gravar'}
+                </button>
+
+                {sttResult && (
+                  <div className="space-y-3">
+                    <div className="text-sm bg-gray-50 rounded-xl p-4 whitespace-pre-wrap border border-gray-200 min-h-[100px]">{sttResult}</div>
+                    <div className="flex gap-2 flex-wrap">
+                      <button onClick={() => copyToClipboard(sttResult)} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-xl text-sm font-medium flex items-center gap-2"><Copy className="w-4 h-4" />Copiar</button>
+                      <button onClick={() => { setChatInput(sttResult); setActiveTab('chat'); }} className="px-4 py-2 bg-indigo-100 hover:bg-indigo-200 rounded-xl text-sm font-medium text-indigo-700 flex items-center gap-2"><Send className="w-4 h-4" />Enviar ao Chat</button>
+                      <button onClick={() => { setAiText(sttResult); setActiveTab('ai'); }} className="px-4 py-2 bg-purple-100 hover:bg-purple-200 rounded-xl text-sm font-medium text-purple-700 flex items-center gap-2"><Sparkles className="w-4 h-4" />Processar</button>
+                      <button onClick={() => exportAsTxt(sttResult, 'transcricao')} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 rounded-xl text-sm font-medium flex items-center gap-2"><FileOutput className="w-4 h-4" />TXT</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+
+      <footer className="border-t border-gray-200/50 bg-white/50">
+        <div className="max-w-5xl mx-auto px-4 py-4 text-center">
+          <p className="text-xs text-gray-400">DocuTools Pro — OCR · Chat IA · Tradução · Áudio · Imagem</p>
+        </div>
+      </footer>
+    </div>
+  );
+}
