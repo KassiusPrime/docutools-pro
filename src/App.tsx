@@ -19,8 +19,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs
 // ============================================
 // SERVIÇO: CHAMADA PARA NOSSA PRÓPRIA API (VERCEL)
 // ============================================
-const CLIENT_AI_TIMEOUT_MS = 60000; // 60 segundos de tolerância para a IA responder
-const CHAT_API_ENDPOINT = '/api/chat'; // Endpoint corrigido sem o "s"
+const CLIENT_AI_TIMEOUT_MS = 60000;
+const CHAT_API_ENDPOINT = '/api/chat';
 
 function parseApiResponse(text: string) {
   try {
@@ -667,7 +667,7 @@ export default function App() {
                 <button onClick={() => setChatMessages([])} className="text-xs text-red-500 hover:text-red-600 flex items-center gap-1">
                   <Trash2 className="w-3 h-3" /> Limpar
                 </button>
-              </div>
+              )}
             </div>
 
             <div ref={chatContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4">
