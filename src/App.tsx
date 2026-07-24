@@ -420,25 +420,32 @@ export default function App() {
     }
   };
 
+  // --- NOVA FUNÇÃO BLINDADA PARA GERAR IMAGEM ---
   const handleGenerateImage = async () => {
     if (!imagePrompt.trim()) {
       showNotification('Insira uma descrição.', 'error');
       return;
     }
+    
     setIsGeneratingImage(true);
     setGeneratedImage('');
+    
     try {
       const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt)}?width=768&height=768&nologo=true&seed=${Date.now()}`;
-      await new Promise<void>((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve();
-        img.onerror = () => reject();
-        img.src = imageUrl;
-      });
-      setGeneratedImage(imageUrl);
-      showNotification('Imagem gerada!');
-    } catch {
-      showNotification('Erro ao gerar imagem.', 'error');
+      const response = await fetch(imageUrl);
+      
+      if (!response.ok) {
+        throw new Error(`Erro na API: ${response.status}`);
+      }
+      
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      
+      setGeneratedImage(objectUrl);
+      showNotification('Imagem gerada com sucesso!');
+    } catch (error) {
+      console.error("Erro detalhado Pollinations:", error);
+      showNotification('Erro ao gerar imagem. Tente uma descrição diferente.', 'error');
     } finally {
       setIsGeneratingImage(false);
     }
@@ -620,7 +627,6 @@ export default function App() {
 
           {activeTab === 'chat' && (
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 flex flex-col h-[75vh]">
-              {/* Header do Chat (Área onde estava o erro de Regex) */}
               <div className="p-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
                 <div className="flex items-center gap-3">
                   <Bot className="w-6 h-6 text-indigo-500" />
@@ -636,7 +642,6 @@ export default function App() {
                 )}
               </div>
 
-              {/* Área de Mensagens */}
               <div ref={chatContainerRef} className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50/30">
                 {chatMessages.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-gray-400 space-y-3">
@@ -662,7 +667,6 @@ export default function App() {
                 )}
               </div>
 
-              {/* Preview de Arquivos Anexados */}
               {chatFiles.length > 0 && (
                 <div className="px-4 py-3 bg-white border-t border-gray-100 flex gap-3 overflow-x-auto">
                   {chatFiles.map((file, i) => (
@@ -680,7 +684,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Input Area */}
               <div className="p-4 bg-white border-t border-gray-200 flex gap-2 items-end">
                 <input type="file" ref={chatFileInputRef} onChange={handleChatFileUpload} className="hidden" multiple />
                 <button onClick={() => chatFileInputRef.current?.click()} className="p-3 mb-1 text-gray-400 hover:text-indigo-500 hover:bg-indigo-50 rounded-xl transition-colors">
