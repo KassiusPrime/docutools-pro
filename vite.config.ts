@@ -65,8 +65,11 @@ export default defineConfig({
         cleanupOutdatedCaches: true,
         maximumFileSizeToCacheInBytes: 30 * 1024 * 1024,
 
+        // Protege a API do cache do PWA
+        navigateFallbackDenylist: [/^\/api/],
+
         globPatterns: [
-          "**/*.{js,css,html,ico,png,svg,woff,woff2}"
+          "**/*.{js,css,html,ico,png,svg,woff,woff2}",
         ],
 
         runtimeCaching: [
