@@ -1,7 +1,3 @@
-// api/chat.ts
-// Função Serverless da Vercel (Edge Runtime)
-// Salve este arquivo na pasta 'api' na raiz do seu projeto.
-
 export const config = {
   runtime: 'edge',
 };
