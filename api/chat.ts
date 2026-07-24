@@ -2,31 +2,42 @@ export const config = {
   runtime: 'edge',
 };
 
+const AI_TIMEOUT_MS = 25000;
+const MAX_OUTPUT_TOKENS = 1200;
+const DEFAULT_OMNIROUTE_BASE_URL = 'http://localhost:20128/v1';
+
+function jsonResponse(body: Record<string, unknown>, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function readProviderError(data: any, fallback: string) {
+  if (!data) return fallback;
+  return (
+    data?.error?.message ||
+    data?.error?.details ||
+    data?.error ||
+    data?.message ||
+    fallback
+  );
+}
+
 export default async function handler(req: Request) {
   if (req.method !== 'POST') {
-    return new Response(
-      JSON.stringify({ error: 'Method Not Allowed' }),
-      {
-        status: 405,
-        headers: { 'Content-Type': 'application/json' },
-      }
-    );
+    return jsonResponse({ error: 'Method Not Allowed' }, 405);
   }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
 
   try {
     const body = await req.json();
     const { provider, model, messages } = body;
 
     if (!provider || !model || !Array.isArray(messages)) {
-      return new Response(
-        JSON.stringify({
-          error: 'Parâmetros obrigatórios ausentes.',
-        }),
-        {
-          status: 400,
-          headers: { 'Content-Type': 'application/json' },
-        }
-      );
+      return jsonResponse({ error: 'Parâmetros obrigatórios ausentes.' }, 400);
     }
 
     let apiUrl = '';
@@ -34,6 +45,7 @@ export default async function handler(req: Request) {
     let requestBody: any = {
       messages,
       temperature: 0.7,
+      max_tokens: MAX_OUTPUT_TOKENS,
     };
 
     // ============================================
@@ -46,6 +58,17 @@ export default async function handler(req: Request) {
         requestBody.model = model;
         break;
 
+      case 'omniroute': {
+        const baseUrl =
+          process.env.OMNIROUTE_BASE_URL ||
+          DEFAULT_OMNIROUTE_BASE_URL;
+
+        apiUrl = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+        apiKey = process.env.OMNIROUTE_API_KEY || 'omniroute';
+        requestBody.model = model;
+        break;
+      }
+
       case 'groq':
         apiUrl = 'https://api.groq.com/openai/v1/chat/completions';
         apiKey = process.env.GROQ_API_KEY || '';
@@ -53,8 +76,9 @@ export default async function handler(req: Request) {
         break;
 
       case 'gemini':
+        apiKey = process.env.GEMINI_API_KEY || '';
         apiUrl =
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
         const geminiContents: any[] = [];
 
@@ -85,33 +109,18 @@ export default async function handler(req: Request) {
           contents: geminiContents,
           generationConfig: {
             temperature: 0.7,
+            maxOutputTokens: MAX_OUTPUT_TOKENS,
           },
         };
 
         break;
 
       default:
-        return new Response(
-          JSON.stringify({
-            error: 'Provedor desconhecido.',
-          }),
-          {
-            status: 400,
-            headers: { 'Content-Type': 'application/json' },
-          }
-        );
+        return jsonResponse({ error: 'Provedor desconhecido.' }, 400);
     }
 
-    if (!apiKey && provider !== 'gemini') {
-      return new Response(
-        JSON.stringify({
-          error: `Chave da API não configurada para ${provider}`,
-        }),
-        {
-          status: 500,
-          headers: { 'Content-Type': 'application/json' },
-        }
-      );
+    if (!apiKey) {
+      return jsonResponse({ error: `Chave da API não configurada para ${provider}` }, 500);
     }
 
     // ============================================
@@ -121,7 +130,7 @@ export default async function handler(req: Request) {
       'Content-Type': 'application/json',
     };
 
-    if (apiKey) {
+    if (provider !== 'gemini') {
       headers.Authorization = `Bearer ${apiKey}`;
     }
 
@@ -138,25 +147,24 @@ export default async function handler(req: Request) {
       method: 'POST',
       headers,
       body: JSON.stringify(requestBody),
+      signal: controller.signal,
     });
 
-    const data = await aiResponse.json();
+    const responseText = await aiResponse.text();
+    let data: any = null;
+
+    try {
+      data = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      data = null;
+    }
 
     if (!aiResponse.ok) {
-      console.error('Erro no provedor:', data);
+      console.error('Erro no provedor:', data || responseText);
 
-      return new Response(
-        JSON.stringify({
-          error:
-            data?.error?.message ||
-            data?.error ||
-            `Erro na IA (${aiResponse.status})`,
-        }),
-        {
-          status: aiResponse.status,
-          headers: { 'Content-Type': 'application/json' },
-        }
-      );
+      return jsonResponse({
+        error: readProviderError(data, `Erro na IA (${aiResponse.status})`),
+      }, aiResponse.status);
     }
 
     // ============================================
@@ -174,24 +182,24 @@ export default async function handler(req: Request) {
         data?.choices?.[0]?.message?.content || '';
     }
 
-    return new Response(
-      JSON.stringify({ answer }),
-      {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }
-    );
+    if (!answer) {
+      return jsonResponse({ error: 'A IA respondeu sem conteúdo.' }, 502);
+    }
+
+    return jsonResponse({ answer });
   } catch (error: any) {
     console.error('Erro interno:', error);
 
-    return new Response(
-      JSON.stringify({
-        error: error?.message || 'Internal Server Error',
-      }),
-      {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-      }
-    );
+    if (error?.name === 'AbortError') {
+      return jsonResponse({
+        error: 'Tempo limite ao aguardar a IA. Tente uma mensagem menor ou outro modelo.',
+      }, 504);
+    }
+
+    return jsonResponse({
+      error: error?.message || 'Internal Server Error',
+    }, 500);
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
