@@ -36,13 +36,26 @@ export default async function handler(req: Request) {
       requestBody.model = model;
     }
     else if (provider === 'gemini') {
-      // O Gemini via OpenRouter é mais fácil, mas se quiser usar a chave nativa do Google:
       apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
       apiKey = ''; // A chave já vai na URL para a API nativa
+
+      // TRADUTOR PARA O PADRÃO GEMINI
+      const geminiContents: any[] = [];
       
-      // Converte o padrão OpenAI (messages) para o padrão nativo do Gemini
-      const parts = messages.map((m: any) => ({ text: m.content }));
-      requestBody = { contents: [{ parts }] };
+      messages.forEach((m: any) => {
+        // Converte 'system' e 'user' para 'user', e 'assistant' para 'model'
+        const role = m.role === 'assistant' ? 'model' : 'user';
+        
+        // O Gemini não aceita duas mensagens seguidas com a mesma 'role' (ex: user + user).
+        // Se a role for igual a anterior, nós fundimos os textos.
+        if (geminiContents.length > 0 && geminiContents[geminiContents.length - 1].role === role) {
+          geminiContents[geminiContents.length - 1].parts[0].text += `\n\n${m.content}`;
+        } else {
+          geminiContents.push({ role, parts: [{ text: m.content }] });
+        }
+      });
+
+      requestBody = { contents: geminiContents };
     } 
     else {
       return new Response(JSON.stringify({ error: 'Provedor desconhecido.' }), { status: 400 });
@@ -58,7 +71,7 @@ export default async function handler(req: Request) {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
-    
+
     if (apiKey) {
       headers['Authorization'] = `Bearer ${apiKey}`;
     }
